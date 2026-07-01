@@ -1,0 +1,140 @@
+# Salvage corpus manifest.
+#
+# The corpus runner consumes this file: for each entry it (1) runs `fetch` to
+# populate dev/corpus/.cache/<name>/, (2) starts the named docker `image`,
+# (3) applies the `load` artifacts in order into `database`, then (4) backs the
+# database up and runs a restore-verification pass.
+#
+# Paths in `fetch` and `load.paths` are relative to dev/corpus/.
+#
+# load.kind:
+#   sql_files        -> psql -f each path in order (plain SQL / pg_dump plain text)
+#   pg_dump_custom   -> pg_restore each path (custom/-Fc archive)
+#   shapefile        -> shp2pgsql each .shp into the db, then psql the result
+#                       (handled inside the postgis image, which bundles shp2pgsql)
+#   csv_copy         -> \copy each CSV into a table after the schema sql is applied
+#
+# Notes for special loads are spelled out per-entry under `runner_notes`.
+
+entries:
+  - name: pagila
+    description: Postgres DVD-rental sample (films, actors, rentals, payments).
+    image: postgres:16
+    database: corpus
+    fetch: sources/pagila/fetch.sh
+    load:
+      kind: sql_files
+      paths:
+        - .cache/pagila/pagila-schema.sql
+        - .cache/pagila/pagila-data.sql
+    license: "Pagila license (modified BSD/PostgreSQL-style; see devrimgunduz/pagila)"
+    size: "~3.4 MB SQL (schema 52 KB + data 3.3 MB); ~15 MB loaded"
+    exercises: >
+      Views, sequences, triggers, stored functions, partitioned payment tables,
+      full-text search (tsvector), domains, custom types/enums, foreign keys.
+
+  - name: chinook
+    description: Digital media store (artists, albums, tracks, invoices).
+    image: postgres:16
+    # The upstream SQL does CREATE DATABASE chinook_serial + \c into it, so the
+    # data lands in chinook_serial, not the default corpus db. The runner should
+    # back up chinook_serial.
+    database: chinook_serial
+    fetch: sources/chinook/fetch.sh
+    load:
+      kind: sql_files
+      paths:
+        - .cache/chinook/chinook.sql
+    license: "MIT (lerocha/chinook-database)"
+    size: "~560 KB SQL; ~2 MB loaded"
+    exercises: >
+      SERIAL/identity columns, multi-table foreign-key graph, varchar-heavy
+      schema, a self-referencing FK (employee -> reports_to). Embeds
+      CREATE DATABASE + \c, so it stresses the runner's handling of scripts that
+      pick their own database name.
+    runner_notes: >
+      Apply chinook.sql against the maintenance db (e.g. postgres) — the script
+      creates chinook_serial and \c-connects into it itself. Back up chinook_serial.
+
+  - name: northwind
+    description: Classic Northwind orders/customers/products sample, Postgres port.
+    image: postgres:16
+    database: corpus
+    fetch: sources/northwind/fetch.sh
+    load:
+      kind: sql_files
+      paths:
+        - .cache/northwind/northwind.sql
+    license: "Community port (pthom/northwind_psql); underlying sample from Microsoft"
+    size: "~350 KB SQL; ~3 MB loaded"
+    exercises: >
+      Composite primary keys, many-to-many join tables (order_details),
+      self-referencing employee hierarchy, ON DELETE/UPDATE FK actions.
+
+  - name: timescale
+    description: TimescaleDB weather sample (device conditions as a hypertable).
+    image: timescale/timescaledb:latest-pg16
+    database: corpus
+    fetch: sources/timescale/fetch.sh
+    load:
+      kind: sql_files
+      paths:
+        - .cache/timescale/weather.sql
+    license: "TimescaleDB sample data (Tiger Data / Timescale, free sample dataset)"
+    size: "~8.4 MB archive; conditions CSV ~70 MB; ~75 MB loaded"
+    exercises: >
+      The timescaledb extension and a hypertable created via create_hypertable()
+      with chunk partitioning. Exercises backup/restore of extension-managed
+      chunk tables and catalog metadata that a naive pg_dump can mishandle.
+    runner_notes: >
+      Requires the timescaledb extension: run
+      `CREATE EXTENSION IF NOT EXISTS timescaledb;` in corpus BEFORE applying
+      weather.sql. weather.sql creates locations + conditions and calls
+      create_hypertable('conditions','time'). It does NOT load the CSV data, so
+      after applying it the runner must copy the two CSVs:
+        \copy locations  FROM '.cache/timescale/weather_small_locations.csv'  CSV
+        \copy conditions FROM '.cache/timescale/weather_small_conditions.csv' CSV
+      For restore verification, dump with `pg_dump` after
+      `SELECT timescaledb_pre_restore();` and reload with
+      `SELECT timescaledb_post_restore();` (Timescale's documented dump/restore
+      dance), or use timescaledb-backup. Plain pg_dump of a hypertable will not
+      round-trip cleanly otherwise.
+
+  - name: postgis
+    description: PostGIS spatial sample — Natural Earth 1:110m admin-0 countries.
+    image: postgis/postgis:16-3.4
+    database: corpus
+    fetch: sources/postgis/fetch.sh
+    load:
+      kind: shapefile
+      paths:
+        - .cache/postgis/ne_110m_admin_0_countries.shp
+    license: "Natural Earth (public domain)"
+    size: "~215 KB zip; ~180 KB shp; <2 MB loaded"
+    exercises: >
+      The postgis extension and a geometry(MultiPolygon) column with a GiST
+      spatial index. Exercises backup/restore of extension-typed columns and
+      spatial indexes.
+    runner_notes: >
+      Requires the postgis extension: run
+      `CREATE EXTENSION IF NOT EXISTS postgis;` in corpus first. Then load the
+      shapefile with shp2pgsql (bundled in the postgis/postgis image):
+        shp2pgsql -s 4326 -I .cache/postgis/ne_110m_admin_0_countries.shp \
+          ne_110m_admin_0_countries | psql -d corpus
+      (-s 4326 sets SRID WGS84, -I builds the GiST index.)
+
+  - name: kitchensink
+    description: Hand-built type/feature kitchen-sink schema (built by a sibling task).
+    image: postgres:16
+    database: corpus
+    # No fetch: kitchensink.sql is committed under dev/corpus/kitchensink/.
+    load:
+      kind: sql_files
+      paths:
+        - kitchensink/kitchensink.sql
+    license: "Salvage project (in-repo)"
+    size: "small (hand-authored)"
+    exercises: >
+      Deliberately broad coverage of Postgres types and features (arrays, JSON/JSONB,
+      ranges, enums, composite types, generated columns, etc.) — see the kitchensink
+      source for specifics.

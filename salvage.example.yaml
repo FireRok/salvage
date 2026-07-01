@@ -1,0 +1,43 @@
+# Salvage — example target definition.
+# Copy to salvage.yaml and edit. `salvage run -config salvage.yaml`.
+
+target:
+  name: prod-orders-db
+  type: postgres
+
+  # The backup artifact to test. v1 reads a local pg_dump or plain-SQL file.
+  # (Object storage + restic/borg/pgBackRest sources are on the roadmap.)
+  source:
+    kind: pg_dump            # pg_dump (custom/dir/tar) | sql (plain)
+    path: ./backups/latest.dump
+
+  # The throwaway environment the backup is rehydrated into.
+  restore:
+    image: postgres:16
+    database: salvage_restore_test
+    timeout: 10m
+
+  # Assertions that prove the restore is actually usable — not just present.
+  # Each SQL must return a single scalar.
+  checks:
+    - name: schema_present
+      sql: "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+      expect_min: 1
+
+    - name: orders_not_empty
+      sql: "SELECT count(*) FROM orders"
+      expect_min: 1
+
+    - name: latest_order_is_recent
+      sql: "SELECT max(created_at) FROM orders"
+      max_age: 36h           # the backup is stale/broken if the newest row is too old
+
+    - name: schema_version
+      sql: "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
+      equals: "20260615000000"
+
+report:
+  format: json
+  out: ./salvage-report.json
+  sign: true                 # local ed25519 signature (integrity, not independence)
+  key_path: ./keys/salvage.key

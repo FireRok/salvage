@@ -1,0 +1,33 @@
+# Salvage — pgBackRest (physical / PITR) restore-test example.
+# Produce a local backup first:  ./dev/pgbackrest/make-backup.sh
+# Then:                          salvage run -config salvage.pgbackrest.example.yaml
+
+target:
+  name: demo-pgbackrest
+  type: postgres
+  source:
+    kind: pgbackrest
+    stanza: demo
+    # Docker volume (or host path) holding the pgBackRest repo, mounted at repo_path.
+    repo_volume: salvage-pgbr-repo
+    repo_path: /var/lib/pgbackrest      # must match the image's pgbackrest.conf repo1-path
+  restore:
+    # Image must carry postgres + pgbackrest + a pgbackrest.conf for the stanza.
+    image: salvage-pg-pgbackrest:16
+    database: seeddb                    # a database that exists inside the restored cluster
+    timeout: 10m
+  checks:
+    - name: schema_present
+      sql: "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+      expect_min: 1
+    - name: orders_not_empty
+      sql: "SELECT count(*) FROM orders"
+      expect_min: 1
+    - name: latest_order_recent
+      sql: "SELECT max(created_at) FROM orders"
+      max_age: 48h
+
+report:
+  format: json
+  out: ./salvage-report-pgbackrest.json
+  sign: false

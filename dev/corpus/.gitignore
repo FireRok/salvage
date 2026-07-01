@@ -1,0 +1,2 @@
+# Downloaded sample-database artifacts are fetched on demand, never committed.
+.cache/

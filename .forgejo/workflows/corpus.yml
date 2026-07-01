@@ -1,0 +1,27 @@
+name: corpus
+
+# Docker-based integration smoke test: for each corpus database, load it, dump
+# it, and prove `salvage run` restores it and `salvage scaffold` introspects it.
+# Heavy (pulls images, fetches sample DBs, runs real restores) so it does NOT run
+# on every push — it is manual (workflow_dispatch) or weekly.
+#
+# REQUIRES a runner with Docker available to the job (docker socket or DinD) and
+# outbound network for the sample-DB fetch scripts. Set `runs-on` to a label your
+# Forgejo runner advertises for such jobs.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+jobs:
+  corpus:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: docker version
+      - run: go build -o /tmp/salvage ./cmd/salvage
+      - name: run corpus
+        run: SALVAGE=/tmp/salvage ./dev/corpus/run.sh

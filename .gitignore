@@ -1,0 +1,27 @@
+# Binaries
+/salvage
+/dist/
+*.exe
+
+# Build / test output
+*.out
+coverage.txt
+
+# Salvage runtime artifacts
+salvage-report.json
+salvage-report-*.json
+*.sig
+
+# Signing keys — never commit these
+*.key
+*.pem
+keys/
+
+# Local config that may contain real connection details
+salvage.local.yaml
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

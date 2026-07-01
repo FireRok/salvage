@@ -1,0 +1,41 @@
+# Salvage — pgBackRest restore-test against a remote (S3 / Cloudflare R2) repo.
+#
+# Credentials are forwarded BY NAME from your environment, so secret values never
+# touch the config, the image, or any command line:
+#
+#   export PGBACKREST_REPO1_S3_KEY="$(your-secret-store get ...)"
+#   export PGBACKREST_REPO1_S3_KEY_SECRET="$(your-secret-store get ...)"
+#   salvage run -config salvage.pgbackrest-s3.example.yaml
+#
+# The restore image must carry postgres + pgbackrest + a pgbackrest.conf defining
+# the repo (repo1-type=s3, endpoint, bucket, path) AND any extensions the source
+# cluster loads (e.g. timescaledb) — otherwise the restored server won't start.
+
+target:
+  name: prod-db
+  type: postgres
+  source:
+    kind: pgbackrest
+    stanza: your-stanza
+    # No repo_volume for a remote repo — the repo lives in the image's
+    # pgbackrest.conf. Forward the S3 credentials by name:
+    pass_env:
+      - PGBACKREST_REPO1_S3_KEY
+      - PGBACKREST_REPO1_S3_KEY_SECRET
+  restore:
+    image: your-registry/postgres-pgbackrest:17   # match source major version + extensions
+    database: postgres
+    user: postgres
+    timeout: 30m
+  checks:
+    - name: server_reachable
+      sql: "SELECT 1"
+      equals: "1"
+    - name: has_user_database
+      sql: "SELECT count(*) FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'"
+      expect_min: 1
+
+report:
+  format: json
+  out: ./salvage-report-pgbackrest-s3.json
+  sign: false
