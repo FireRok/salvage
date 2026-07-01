@@ -1,23 +1,32 @@
 // Package engine orchestrates a restore-test: stand up a throwaway database,
 // restore the backup into it, and assert it actually works.
+//
+// The orchestration is engine-agnostic. It resolves the engine for the config's
+// target.type from the SPI registry (spec 0016) and drives it through the
+// spi.Engine interface; the Postgres-specific mechanics live behind that seam in
+// internal/engine/postgres. Adding a new database/backup type is implementing
+// spi.Engine + registering it, with no change here.
 package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"salvage.sh/internal/checks"
 	"salvage.sh/internal/config"
 	"salvage.sh/internal/discover"
-	"salvage.sh/internal/ephemeral"
-	"salvage.sh/internal/pgbrinfo"
+	"salvage.sh/internal/engine/spi"
 	"salvage.sh/internal/report"
 	"salvage.sh/internal/scaffold"
 	"salvage.sh/internal/version"
+
+	// Register the built-in engines. Blank import for their init() side effect;
+	// this is the single place engines are wired into the CLI.
+	_ "salvage.sh/internal/engine/postgres"
 )
 
 // Run executes the full restore-test for cfg.
@@ -31,77 +40,48 @@ func Run(ctx context.Context, cfg *config.Config) (*report.Report, error) {
 	rep.Restore.Image = cfg.Target.Restore.Image
 	rep.Restore.Database = cfg.Target.Restore.Database
 
+	eng, err := spi.Lookup(cfg.Target.Type)
+	if err != nil {
+		rep.Restore.OK = false
+		rep.Restore.Error = err.Error()
+		rep.Finalize()
+		return rep, err // operational: unknown target type
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, cfg.Target.Restore.Timeout.Std())
 	defer cancel()
 
 	start := time.Now()
-	var q checks.Queryer
-
-	switch cfg.Target.Source.Kind {
-	case "pgbackrest":
-		for _, name := range cfg.Target.Source.PassEnv {
-			if os.Getenv(name) == "" {
-				err := fmt.Errorf("required env %s is not set (export it before running salvage)", name)
-				rep.Restore.OK = false
-				rep.Restore.Error = err.Error()
-				rep.Finalize()
-				return rep, err // operational
-			}
-		}
-		env, err := ephemeral.StartRestoreEnv(ctx, cfg.Target.Restore.Image,
-			cfg.Target.Source.RepoPath, cfg.Target.Source.RepoVolume,
-			cfg.Target.Restore.Database, cfg.Target.Restore.User,
-			cfg.Target.Source.PassEnv, cfg.Target.Restore.PreloadLibraries)
-		if err != nil {
-			rep.Restore.OK = false
-			rep.Restore.Error = err.Error()
+	rt, warn, rerr := eng.Restore(ctx, cfg)
+	if rerr != nil {
+		rep.Restore.OK = false
+		rep.Restore.Error = rerr.Error()
+		if isFault(rerr) {
+			// Operational failure (Docker down, missing secret, could not create
+			// the environment): no verdict, exit non-zero.
 			rep.Finalize()
-			return rep, err // operational: couldn't create the environment
+			return rep, rerr
 		}
-		defer env.Stop()
-		if err := env.Restore(ctx, cfg.Target.Source.Stanza, ""); err != nil {
-			rep.Restore.OK = false
-			rep.Restore.Error = err.Error()
-			rep.Restore.DurationMS = time.Since(start).Milliseconds()
-			rep.Finalize()
-			return rep, nil // verdict fail: the backup did not restore/recover
-		}
-		q = env
-
-	default: // pg_dump, sql
-		pg, err := ephemeral.StartPostgres(ctx, cfg.Target.Restore.Image, cfg.Target.Restore.Database)
-		if err != nil {
-			rep.Restore.OK = false
-			rep.Restore.Error = err.Error()
-			rep.Finalize()
-			return rep, err // operational
-		}
-		defer pg.Stop()
-		warn, rerr := pg.Restore(ctx, cfg.Target.Source.Kind, cfg.Target.Source.Path)
-		if rerr != nil {
-			rep.Restore.OK = false
-			rep.Restore.Error = rerr.Error()
-			rep.Restore.DurationMS = time.Since(start).Milliseconds()
-			rep.Finalize()
-			return rep, nil // verdict fail
-		}
-		rep.Restore.Warnings = warn
-		q = pg
+		// The backup did not restore/recover: a normal "fail" verdict.
+		rep.Restore.DurationMS = time.Since(start).Milliseconds()
+		rep.Finalize()
+		return rep, nil
 	}
+	defer rt.Stop()
 
 	rep.Restore.OK = true
+	rep.Restore.Warnings = warn
 	rep.Restore.DurationMS = time.Since(start).Milliseconds()
-	rep.Checks = checks.Run(ctx, q, cfg.Target.Checks)
+	rep.Checks = checks.Run(ctx, rt, cfg.Target.Checks)
 	rep.Finalize()
 	return rep, nil
 }
 
-// queryEnv is a live restored cluster that answers both scalar and row queries
-// and can be torn down. Both ephemeral restore types satisfy it.
-type queryEnv interface {
-	checks.Queryer
-	discover.RowQueryer
-	Stop() error
+// isFault reports whether err is an operational fault (as opposed to a
+// restore-verdict failure). Uses errors.As so wrapped faults still match.
+func isFault(err error) bool {
+	var f *spi.Fault
+	return errors.As(err, &f)
 }
 
 // Scaffold restores the backup, introspects the restored cluster, generates a
@@ -109,46 +89,25 @@ type queryEnv interface {
 // rendered YAML target config. See spec 0009. It is an operational helper, not a
 // verdict: any failure returns an error.
 func Scaffold(ctx context.Context, cfg *config.Config) ([]byte, error) {
+	eng, err := spi.Lookup(cfg.Target.Type)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, cfg.Target.Restore.Timeout.Std())
 	defer cancel()
 
-	var env queryEnv
-	switch cfg.Target.Source.Kind {
-	case "pgbackrest":
-		for _, name := range cfg.Target.Source.PassEnv {
-			if os.Getenv(name) == "" {
-				return nil, fmt.Errorf("required env %s is not set", name)
-			}
-		}
-		pb, err := ephemeral.StartRestoreEnv(ctx, cfg.Target.Restore.Image,
-			cfg.Target.Source.RepoPath, cfg.Target.Source.RepoVolume,
-			cfg.Target.Restore.Database, cfg.Target.Restore.User,
-			cfg.Target.Source.PassEnv, cfg.Target.Restore.PreloadLibraries)
-		if err != nil {
-			return nil, err
-		}
-		env = pb
-		defer env.Stop()
-		if err := pb.Restore(ctx, cfg.Target.Source.Stanza, ""); err != nil {
-			return nil, fmt.Errorf("restore: %w", err)
-		}
-	default: // pg_dump, sql
-		pg, err := ephemeral.StartPostgres(ctx, cfg.Target.Restore.Image, cfg.Target.Restore.Database)
-		if err != nil {
-			return nil, err
-		}
-		env = pg
-		defer env.Stop()
-		if _, err := pg.Restore(ctx, cfg.Target.Source.Kind, cfg.Target.Source.Path); err != nil {
-			return nil, fmt.Errorf("restore: %w", err)
-		}
+	rt, _, rerr := eng.Restore(ctx, cfg)
+	if rerr != nil {
+		return nil, fmt.Errorf("restore: %w", rerr)
 	}
+	defer rt.Stop()
 
-	disc, err := discover.Introspect(ctx, env, cfg.Target.Restore.Database)
+	disc, err := discover.Introspect(ctx, rt, cfg.Target.Restore.Database)
 	if err != nil {
 		return nil, fmt.Errorf("introspect: %w", err)
 	}
-	generated := verifyChecks(ctx, env, discover.GenerateChecks(disc))
+	generated := verifyChecks(ctx, rt, discover.GenerateChecks(disc))
 
 	name := cfg.Target.Name
 	if name == "" {
@@ -174,43 +133,41 @@ func verifyChecks(ctx context.Context, q checks.Queryer, in []config.Check) []co
 	return out
 }
 
-// LastGood walks the pgBackRest backup chain newest->oldest, restore-testing each
-// backup with the configured checks, and returns the first that passes as the
-// recovery point (spec 0010). maxTry caps how many to try (0 = until the first
-// pass). It finds the freshest *restorable* backup; it does not repair or extract.
+// LastGood walks the backup chain newest->oldest, restore-testing each backup
+// with the configured checks, and returns the first that passes as the recovery
+// point (spec 0010). maxTry caps how many to try (0 = until the first pass). It
+// finds the freshest *restorable* backup; it does not repair or extract.
+//
+// It requires an engine that implements spi.ChainTester (pgBackRest today); for
+// any other engine/source it returns a clear "not supported" error.
 func LastGood(ctx context.Context, cfg *config.Config, maxTry int) (*report.LastGood, error) {
+	eng, err := spi.Lookup(cfg.Target.Type)
+	if err != nil {
+		return nil, err
+	}
+	ct, ok := eng.(spi.ChainTester)
+	if !ok {
+		return nil, fmt.Errorf("last-good is not supported for target.type %q", cfg.Target.Type)
+	}
+	// last-good is pgBackRest-specific today; the ChainTester capability is only
+	// meaningful for a chain-backed source.
 	if cfg.Target.Source.Kind != "pgbackrest" {
 		return nil, fmt.Errorf("last-good supports pgbackrest sources only (got %q)", cfg.Target.Source.Kind)
 	}
-	for _, name := range cfg.Target.Source.PassEnv {
-		if os.Getenv(name) == "" {
-			return nil, fmt.Errorf("required env %s is not set", name)
-		}
-	}
+
 	stanza := cfg.Target.Source.Stanza
 	lg := &report.LastGood{Tool: "salvage", Version: version.Version, Stanza: stanza}
 
-	// One short-lived env just to read the backup chain.
-	infoEnv, err := startPgBackRest(ctx, cfg)
+	backups, err := ct.Chain(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	raw, ierr := infoEnv.Info(ctx, stanza)
-	infoEnv.Stop()
-	if ierr != nil {
-		return nil, ierr
-	}
-	backups, err := pgbrinfo.Parse(raw, stanza)
-	if err != nil {
-		return nil, err
-	}
-
 	for i, b := range backups {
 		if maxTry > 0 && i >= maxTry {
 			break
 		}
 		v := report.BackupVerdict{Label: b.Label, Type: b.Type, Timestamp: b.Timestamp}
-		reason := testBackup(ctx, cfg, b.Label)
+		reason := ct.TestBackup(ctx, cfg, b.Label)
 		if reason == "" {
 			v.Verdict = "pass"
 			lg.Tested = append(lg.Tested, v)
@@ -224,32 +181,30 @@ func LastGood(ctx context.Context, cfg *config.Config, maxTry int) (*report.Last
 	return lg, nil
 }
 
-// Fleet enumerates every stanza in a pgBackRest repo (a cheap, metadata-only
-// survey via `pgbackrest info` — no restore). When outDir is non-empty it also
-// writes a per-stanza skeleton config there (structural checks only; the user
-// runs `salvage scaffold` against each to add data checks). See spec 0011.
+// Fleet enumerates every unit (pgBackRest stanza) in a repo (a cheap,
+// metadata-only survey — no restore). When outDir is non-empty it also writes a
+// per-unit skeleton config there (structural checks only; the user runs
+// `salvage scaffold` against each to add data checks). See spec 0011.
+//
+// It requires an engine that implements spi.FleetSurveyor (pgBackRest today);
+// for any other engine/source it returns a clear "not supported" error.
 func Fleet(ctx context.Context, cfg *config.Config, outDir string) (*report.Fleet, error) {
-	if cfg.Target.Source.Kind != "pgbackrest" {
-		return nil, fmt.Errorf("fleet supports pgbackrest sources only (got %q)", cfg.Target.Source.Kind)
-	}
-	for _, name := range cfg.Target.Source.PassEnv {
-		if os.Getenv(name) == "" {
-			return nil, fmt.Errorf("required env %s is not set", name)
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, cfg.Target.Restore.Timeout.Std())
-	defer cancel()
-
-	env, err := startPgBackRest(ctx, cfg)
+	eng, err := spi.Lookup(cfg.Target.Type)
 	if err != nil {
 		return nil, err
 	}
-	raw, ierr := env.Info(ctx, "") // empty stanza → every stanza in the repo
-	env.Stop()
-	if ierr != nil {
-		return nil, ierr
+	fs, ok := eng.(spi.FleetSurveyor)
+	if !ok {
+		return nil, fmt.Errorf("fleet is not supported for target.type %q", cfg.Target.Type)
 	}
-	stanzas, err := pgbrinfo.Stanzas(raw)
+	if cfg.Target.Source.Kind != "pgbackrest" {
+		return nil, fmt.Errorf("fleet supports pgbackrest sources only (got %q)", cfg.Target.Source.Kind)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, cfg.Target.Restore.Timeout.Std())
+	defer cancel()
+
+	units, err := fs.Survey(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -261,19 +216,16 @@ func Fleet(ctx context.Context, cfg *config.Config, outDir string) (*report.Flee
 	}
 
 	fl := &report.Fleet{Tool: "salvage", Version: version.Version}
-	for _, s := range stanzas {
+	for _, u := range units {
 		sum := report.StanzaSummary{
-			Name:        s.Name,
-			Status:      statusText(s),
-			BackupCount: len(s.Backups),
-		}
-		if nb, ok := s.Newest(); ok {
-			sum.NewestLabel = nb.Label
-			ts := nb.Timestamp
-			sum.NewestBackup = &ts
+			Name:         u.Name,
+			Status:       u.Status,
+			BackupCount:  u.BackupCount,
+			NewestLabel:  u.NewestLabel,
+			NewestBackup: u.NewestBackup,
 		}
 		if outDir != "" {
-			path, werr := writeSkeleton(cfg, s.Name, outDir)
+			path, werr := writeSkeleton(cfg, fs, u.Name, outDir)
 			if werr != nil {
 				return nil, werr
 			}
@@ -284,70 +236,20 @@ func Fleet(ctx context.Context, cfg *config.Config, outDir string) (*report.Flee
 	return fl, nil
 }
 
-// statusText renders a stanza's pgBackRest status, defaulting to "ok".
-func statusText(s pgbrinfo.Stanza) string {
-	if s.StatusMessage != "" {
-		return s.StatusMessage
-	}
-	if s.StatusCode == 0 {
-		return "ok"
-	}
-	return fmt.Sprintf("status %d", s.StatusCode)
-}
-
-// writeSkeleton emits a per-stanza skeleton config (structural checks only) into
-// outDir, named <stanza>.yaml. The source is inherited from cfg with the stanza
-// swapped in, so repo location + credentials carry over.
-func writeSkeleton(cfg *config.Config, stanza, outDir string) (string, error) {
-	src := cfg.Target.Source
-	src.Stanza = stanza
+// writeSkeleton emits a per-unit skeleton config (structural checks only) into
+// outDir, named <unit>.yaml. The source is obtained from the engine's
+// SkeletonSource so repo location + credentials carry over with the unit swapped in.
+func writeSkeleton(cfg *config.Config, fs spi.FleetSurveyor, unit, outDir string) (string, error) {
+	src := fs.SkeletonSource(cfg, unit)
 	structural := discover.GenerateChecks(&discover.Discovery{}) // the 3 required structural checks
-	skel := scaffold.Build(stanza, src, cfg.Target.Restore, structural, "./salvage-report-"+stanza+".json")
+	skel := scaffold.Build(unit, src, cfg.Target.Restore, structural, "./salvage-report-"+unit+".json")
 	rendered, err := scaffold.RenderSkeleton(skel)
 	if err != nil {
-		return "", fmt.Errorf("render skeleton for %s: %w", stanza, err)
+		return "", fmt.Errorf("render skeleton for %s: %w", unit, err)
 	}
-	path := filepath.Join(outDir, stanza+".yaml")
+	path := filepath.Join(outDir, unit+".yaml")
 	if err := os.WriteFile(path, rendered, 0o644); err != nil {
-		return "", fmt.Errorf("write skeleton for %s: %w", stanza, err)
+		return "", fmt.Errorf("write skeleton for %s: %w", unit, err)
 	}
 	return path, nil
-}
-
-func startPgBackRest(ctx context.Context, cfg *config.Config) (*ephemeral.PgBackRest, error) {
-	return ephemeral.StartRestoreEnv(ctx, cfg.Target.Restore.Image,
-		cfg.Target.Source.RepoPath, cfg.Target.Source.RepoVolume,
-		cfg.Target.Restore.Database, cfg.Target.Restore.User,
-		cfg.Target.Source.PassEnv, cfg.Target.Restore.PreloadLibraries)
-}
-
-// testBackup restore-tests one backup (pinned by label) with the configured
-// checks. Returns "" on success or a short failure reason.
-func testBackup(ctx context.Context, cfg *config.Config, label string) string {
-	tctx, cancel := context.WithTimeout(ctx, cfg.Target.Restore.Timeout.Std())
-	defer cancel()
-	env, err := startPgBackRest(tctx, cfg)
-	if err != nil {
-		return "could not start restore env: " + err.Error()
-	}
-	defer env.Stop()
-	if err := env.Restore(tctx, cfg.Target.Source.Stanza, label); err != nil {
-		return firstLine(err.Error())
-	}
-	for _, res := range checks.Run(tctx, env, cfg.Target.Checks) {
-		if !res.OK && res.Severity != "advisory" {
-			if res.Error != "" {
-				return res.Name + ": " + res.Error
-			}
-			return res.Name + ": " + res.Detail
-		}
-	}
-	return ""
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
 }

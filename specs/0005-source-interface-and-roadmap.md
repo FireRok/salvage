@@ -92,6 +92,12 @@ restore-and-start. Non-PostgreSQL engines are out of scope for now.
   `barman`, plain `pg_basebackup`.
 - **Out of scope:** cloud-provider managed snapshots; non-PostgreSQL engines (for now).
 
+The *engine* seam that lets a non-PostgreSQL engine be added later without
+touching the core orchestrator is specified in `0016` (modular engines): an
+`Engine` SPI keyed by `target.type` plus a registry, with Postgres as the first
+registered engine. R6's small source-kind interface lives *inside* an engine;
+`0016` is the layer above it that selects which engine handles a target.
+
 ## How this sharpens other specs
 
 - **`0001` (config-for-intent):** transport config belongs to the backup tool's
