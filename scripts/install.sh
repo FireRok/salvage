@@ -111,7 +111,7 @@ if command -v cosign >/dev/null 2>&1; then
   if fetch "${base}/checksums.txt.sigstore.json" "${tmp}/checksums.txt.sigstore.json" 2>/dev/null; then
     if cosign verify-blob \
       --bundle "${tmp}/checksums.txt.sigstore.json" \
-      --certificate-identity-regexp "^https://github\\.com/firerok/salvage/\\.github/workflows/release\\.yml@" \
+      --certificate-identity-regexp "^https://github\\.com/(?i:firerok)/salvage/\\.github/workflows/release\\.yml@" \
       --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
       "${tmp}/checksums.txt" >/dev/null 2>&1; then
       verified="sha256 checksum + cosign signature"

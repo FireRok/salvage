@@ -267,7 +267,7 @@ information (cosign ≥ 2.4):
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
   --certificate-identity-regexp \
-    '^https://github\.com/firerok/salvage/\.github/workflows/release\.yml@refs/tags/v' \
+    '^https://github\.com/(?i:firerok)/salvage/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 
