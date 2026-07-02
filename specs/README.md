@@ -50,7 +50,7 @@ a change in intent starts as a spec edit, then the implementation follows.
 | [0030](./0030-alerting-integrations.md) | Alerting integrations (webhook / Slack / PagerDuty) | Implemented |
 | [0031](./0031-orgs-teams-rbac.md) | Organizations, teams & RBAC (the MSP multi-tenancy gap) | Implemented |
 | [0032](./0032-mcp-server.md) | The `salvage` MCP server (agent-operable Salvage) | Implemented |
-| [0033](./0033-distribution-packaging.md) | Distribution & packaging (release artifacts, signing, install paths) | Proposed |
+| [0033](./0033-distribution-packaging.md) | Distribution & packaging (release artifacts, signing, install paths) | Implemented |
 | [0034](./0034-release-versioning-changelog.md) | Release process, versioning & changelog | Proposed |
 | [0035](./0035-upgrade-compatibility-policy.md) | Upgrade & compatibility policy (what keeps working across versions) | Proposed |
 | [0036](./0036-supported-platforms-matrix.md) | Supported-platforms & engine-version matrix | Proposed |

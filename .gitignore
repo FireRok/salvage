@@ -27,3 +27,5 @@ salvage.local.yaml
 .vscode/
 dev/mongodb/seed-dump.archive
 dev/mysql/seed-dump.sql
+dev/exec/work/
+dev/exec/restored/

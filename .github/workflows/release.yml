@@ -6,6 +6,10 @@ on:
 
 permissions:
   contents: write
+  # Spec 0033 R2: keyless signing — cosign exchanges this workflow's OIDC
+  # identity token for an ephemeral signing certificate, so the signature is
+  # bound to *this repository's release workflow* with no long-lived key.
+  id-token: write
 
 jobs:
   goreleaser:
@@ -17,6 +21,23 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
+      # Spec 0033 R2: goreleaser's signs: block runs `cosign sign-blob` over
+      # checksums.txt and uploads checksums.txt.sigstore.json (the sigstore
+      # bundle: signature + ephemeral certificate + transparency-log proof in
+      # one file — cosign v3 dropped the split .sig/.pem flags) as a release
+      # asset. One signature over the checksum manifest transitively covers
+      # every archive. Third parties verify with ONLY public information (the
+      # certificate chains to Fulcio, the signature is logged in Rekor):
+      #
+      #   cosign verify-blob \
+      #     --bundle checksums.txt.sigstore.json \
+      #     --certificate-identity-regexp \
+      #       '^https://github\.com/firerok/salvage/\.github/workflows/release\.yml@refs/tags/v' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     checksums.txt
+      #
+      # A release whose signature does not verify MUST be treated as invalid.
+      - uses: sigstore/cosign-installer@v3
       # Spec 0034 R4: release notes are the tag's CHANGELOG.md section, and a
       # release without a changelog entry fails closed.
       - name: Extract release notes from CHANGELOG.md
@@ -36,3 +57,16 @@ jobs:
           args: release --clean --release-notes /tmp/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Spec 0033 R4: HOMEBREW_TAP_TOKEN is a PAT with contents:write on
+          # github.com/firerok/homebrew-salvage; goreleaser's brews: block
+          # pushes the regenerated formula there on every release.
+          #
+          # LOUD FAILURE-ISOLATION NOTE: if the HOMEBREW_TAP_TOKEN secret is
+          # missing/empty, HOMEBREW_SKIP_UPLOAD below evaluates to "true" and
+          # the brews: block sets skip_upload from it — the tap push is
+          # SKIPPED (formula still rendered into dist/ for inspection) and the
+          # release itself CANNOT fail because of the absent secret. Configure
+          # the secret to get automatic tap updates; watch the goreleaser log
+          # for the skip notice.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_SKIP_UPLOAD: ${{ secrets.HOMEBREW_TAP_TOKEN == '' && 'true' || 'false' }}

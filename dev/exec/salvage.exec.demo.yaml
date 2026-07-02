@@ -1,0 +1,46 @@
+# Salvage — exec engine demo (spec 0020, bring-your-own-restore).
+# A runnable end-to-end fixture: ./make-backup.sh builds a SQLite backup
+# artifact with known contents; ./restore.sh is the "customer's own restore
+# script" Salvage runs; the checks then assert the restored data is really
+# there AND usable (sqlite3 queries against the restored database, not just
+# file presence). Needs only sqlite3 + tar — no Docker.
+#
+#   ./dev/exec/make-backup.sh
+#   salvage run -config dev/exec/salvage.exec.demo.yaml   # from the repo root
+
+target:
+  name: demo-exec
+  type: exec
+  restore:
+    command: ["bash", "restore.sh"]  # the customer's own restore script; exit 0 = restored
+    workdir: dev/exec                # resolved against salvage's cwd (run from repo root)
+    timeout: 5m
+  # Relative check paths and command checks resolve against restore.workdir.
+  checks:
+    # The restored database landed where the restore script said it would.
+    - name: database_restored
+      kind: file_exists
+      path: restored/app.db
+    # Exactly the artifact's two files were restored (app.db + MANIFEST).
+    - name: restore_complete
+      kind: file_count
+      path: "restored/*"
+      expect_min: 2
+      expect_max: 2
+    # The MANIFEST survived the backup->restore round trip bit-for-bit.
+    - name: manifest_checksum
+      kind: checksum
+      path: restored/MANIFEST
+      equals: "88142e427bea0aae674484cfbfeec8d9e9b4230090a21be72ad171da71286a12"
+    # The data is USABLE, not just present: query the restored database.
+    - name: orders_row_count
+      kind: command
+      command: test "$(sqlite3 restored/app.db 'SELECT count(*) FROM orders')" = "10"
+    - name: known_customer_present
+      kind: command
+      command: test "$(sqlite3 restored/app.db 'SELECT name FROM customers WHERE id = 1')" = "alice"
+
+report:
+  format: json
+  out: ./dev/exec/salvage-report-exec.json
+  sign: false

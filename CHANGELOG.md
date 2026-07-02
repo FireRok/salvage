@@ -12,6 +12,40 @@ for a tag are that release's section of this file.
 
 Nothing yet.
 
+## [0.2.1] — 2026-07-02
+
+### Added
+
+- One-command install: `curl -fsSL https://salvage.sh/install.sh | sh`
+  (`scripts/install.sh`). Detects OS/arch (macOS/Linux, amd64/arm64), verifies
+  the artifact's SHA-256 against the release's `checksums.txt` **before**
+  unpacking (a mismatch aborts with nothing installed), additionally verifies
+  the manifest's cosign signature when `cosign` is present, honors
+  `SALVAGE_VERSION` and `SALVAGE_INSTALL_DIR`, and never invokes `sudo`.
+  ([spec 0033](./specs/0033-distribution-packaging.md))
+- Signed releases: every release now ships `checksums.txt.sigstore.json` — a
+  keyless cosign signature bundle over the checksum manifest, bound to the
+  public release workflow's identity and verifiable by third parties using
+  only public information (cosign ≥ 2.4). The verification procedure is
+  documented in the README under "Verify the artifacts".
+  ([spec 0033](./specs/0033-distribution-packaging.md))
+- Homebrew tap: `brew install firerok/salvage/salvage`; the release pipeline
+  regenerates and pushes the formula automatically on each release.
+  ([spec 0033](./specs/0033-distribution-packaging.md))
+- `salvage version -check` — opt-in update check against the GitHub releases
+  API (10s timeout): prints the running and latest versions and exits `0`
+  up to date / `1` newer release available / `2` check failed. Plain
+  `salvage version` still performs no network I/O, the check transmits nothing
+  beyond the version lookup itself, and Salvage never modifies its own binary.
+  ([spec 0033](./specs/0033-distribution-packaging.md))
+
+### Changed
+
+- README and getting-started guide now lead with the prebuilt install paths
+  (install script, Homebrew) before `go install`, with build-from-source last;
+  the Quickstart no longer requires Go.
+  ([spec 0033](./specs/0033-distribution-packaging.md))
+
 ## [0.2.0] — 2026-07-02
 
 ### Added

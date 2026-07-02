@@ -122,7 +122,7 @@ engine.
 salvage run   [-json] -config salvage.yaml   # restore into a throwaway db and assert it works (-json: report to stdout)
 salvage check -config salvage.yaml           # validate config + preflight Docker (no restore)
 salvage inspect [-json] <pgdata-dir>         # offline pre-flight on an unpacked PGDATA dir
-salvage version
+salvage version [-check]                     # -check: also report whether a newer release exists (never auto-updates)
 salvage help
 ```
 
@@ -216,14 +216,76 @@ target:
   (`source.pass_env`), never embedded in config or command lines. Use a
   **read-only** repo token.
 
+## Install
+
+Prebuilt binaries ship for macOS and Linux (amd64/arm64) — no Go needed.
+
+**Install script** — detects your platform, verifies the artifact's SHA-256
+against the release manifest *before* unpacking (plus the manifest's cosign
+signature when `cosign` is installed), and installs the binary. It never
+invokes `sudo`; `SALVAGE_VERSION=vX.Y.Z` pins a release and
+`SALVAGE_INSTALL_DIR` overrides the destination (default: `/usr/local/bin`
+when writable, else `~/.local/bin`):
+
+```sh
+curl -fsSL https://salvage.sh/install.sh | sh
+```
+
+**Homebrew** (macOS and Linuxbrew) — the tap formula is updated automatically
+by the release pipeline:
+
+```sh
+brew install firerok/salvage/salvage
+```
+
+**`go install`** (Go 1.23+):
+
+```sh
+go install salvage.sh/cmd/salvage@latest
+```
+
+**Build from source** (Go 1.23+; one dependency: `gopkg.in/yaml.v3`):
+
+```sh
+git clone https://github.com/firerok/salvage && cd salvage
+make build                 # produces ./salvage
+```
+
+On every path, `salvage version` reports the release version.
+
+### Verify the artifacts
+
+Every release publishes `checksums.txt` (SHA-256 of each archive) plus a
+keyless [cosign](https://docs.sigstore.dev/) signature over it
+(`checksums.txt.sigstore.json` — a sigstore bundle carrying the signature,
+the ephemeral certificate, and the transparency-log proof), bound to this
+repository's release-workflow identity and recorded in the Rekor transparency
+log — so anyone can verify a download end-to-end using only public
+information (cosign ≥ 2.4):
+
+```sh
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp \
+    '^https://github\.com/firerok/salvage/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+
+sha256sum --check --ignore-missing checksums.txt   # macOS: shasum -a 256 -c
+```
+
+A release whose signature does not verify must be treated as invalid. The
+install script always enforces the checksum verification and adds the
+signature verification when `cosign` is present. (Releases up to v0.2.0
+predate signing and carry no signature bundle.)
+
 ## Quickstart
 
 ```sh
-brew install go            # Salvage builds with Go 1.23+
-make build                 # produces ./salvage   (one dependency: gopkg.in/yaml.v3)
+curl -fsSL https://salvage.sh/install.sh | sh    # or: brew install firerok/salvage/salvage
 cp salvage.example.yaml salvage.yaml   # then edit
-./salvage check            # validate config + preflight Docker
-./salvage run              # restore-test and print the verdict
+salvage check              # validate config + preflight Docker
+salvage run                # restore-test and print the verdict
 ```
 
 ## Roadmap

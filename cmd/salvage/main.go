@@ -22,7 +22,6 @@ import (
 	"salvage.sh/internal/ephemeral"
 	"salvage.sh/internal/inspect"
 	"salvage.sh/internal/report"
-	"salvage.sh/internal/version"
 )
 
 func main() {
@@ -56,7 +55,7 @@ func main() {
 	case "mcp":
 		cmdMCP(os.Args[2:])
 	case "version", "-v", "--version":
-		fmt.Println("salvage " + version.String())
+		cmdVersion(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -82,7 +81,7 @@ Usage:
   salvage attest   -config salvage.yaml   run the test, then submit the signed report to a hosted attestation notary
   salvage verify   [-json] <id|url>        fetch an attestation and verify it offline against Firerok's public key
   salvage mcp                              serve Salvage as an MCP server over stdio (agent tools for run/check/inspect/last-good/fleet/verify/attest/scaffold)
-  salvage version
+  salvage version [-check]                 print the version; -check also asks the release API whether a newer release exists (never auto-updates)
   salvage help
 
 Diagnostics:

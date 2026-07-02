@@ -17,7 +17,7 @@ Every command shares the same exit-code contract: `0` = pass, `1` = verdict fail
 | [`attest`](#attest) | Run the test, then submit the signed report to the hosted notary. |
 | [`verify`](#verify) | Fetch an attestation and verify it offline. |
 | [`mcp`](#mcp) | Serve Salvage as an MCP server over stdio, for agent runtimes. |
-| [`version`](#version) | Print the version. |
+| [`version`](#version) | Print the version; `-check` also reports whether a newer release exists. |
 
 ## Diagnostics: `-verbose` / `-quiet`
 
@@ -319,5 +319,22 @@ report file — the report JSON *is* the tool result.
 ## `version`
 
 ```sh
-salvage version
+salvage version [-check]
 ```
+
+Prints the running version. Plain `salvage version` performs **no network
+I/O**. With `-check` it additionally queries the GitHub releases API for the
+latest published release (10-second timeout; the request carries nothing
+beyond the version lookup itself — no identifiers, no telemetry), prints both
+versions, and exits:
+
+| Exit | Meaning |
+|-----:|---------|
+| `0` | up to date |
+| `1` | a newer release exists (a *result*, not a crash) |
+| `2` | the check could not be performed (network/API error, or a dev/off-tag build whose version cannot be compared) |
+
+Salvage **never updates itself**: `-check` reports, the operator (or their
+package manager) acts. When a newer release exists, the output includes the
+one-line install command. This makes update drift visible on unattended hosts
+(e.g. a `salvage schedule` runner) without any auto-update machinery.

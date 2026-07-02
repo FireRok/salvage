@@ -21,17 +21,48 @@ migrate anything.
   (local or remote S3/R2), a `mysqldump` file, a `mongodump --archive` file, a
   restic snapshot, or a borg archive. See [Engines](./03-engines.md).
 
-## Install / build
+## Install
 
-Salvage builds into a single binary with one dependency (`gopkg.in/yaml.v3`):
+Pick one path — prebuilt binaries (macOS/Linux, amd64/arm64) need no Go:
 
-```sh
-brew install go            # Go 1.23+; skip if you have a prebuilt binary
-make build                 # produces ./salvage
-```
+1. **Install script** — detects your platform, verifies the artifact's
+   SHA-256 against the release manifest *before* unpacking (plus the
+   manifest's cosign signature when `cosign` is installed), and installs
+   without ever invoking `sudo`:
 
-Prebuilt binaries are published on GitHub releases (built via GoReleaser when a
-`v*` tag lands).
+   ```sh
+   curl -fsSL https://salvage.sh/install.sh | sh
+   ```
+
+   `SALVAGE_VERSION=vX.Y.Z` pins a release; `SALVAGE_INSTALL_DIR` overrides
+   the destination (default: `/usr/local/bin` when writable, else
+   `~/.local/bin`).
+
+2. **Homebrew** (macOS and Linuxbrew) — the formula tracks releases
+   automatically:
+
+   ```sh
+   brew install firerok/salvage/salvage
+   ```
+
+3. **`go install`** (Go 1.23+):
+
+   ```sh
+   go install salvage.sh/cmd/salvage@latest
+   ```
+
+4. **Build from source** (Go 1.23+; one dependency, `gopkg.in/yaml.v3`):
+
+   ```sh
+   git clone https://github.com/firerok/salvage && cd salvage
+   make build                 # produces ./salvage
+   ```
+
+On every path, `salvage version` reports the release version. Each release's
+`checksums.txt` is signed with keyless cosign; the third-party verification
+procedure is in the README under "Verify the artifacts". Later, an opt-in
+`salvage version -check` tells you when a newer release exists (see
+[Commands](./04-commands.md#version)) — Salvage never updates itself.
 
 ## Your first run
 
@@ -49,14 +80,14 @@ Prebuilt binaries are published on GitHub releases (built via GoReleaser when a
 2. **Validate the config and preflight Docker** (no restore happens yet):
 
    ```sh
-   ./salvage check -config salvage.yaml
+   salvage check -config salvage.yaml
    # ok — target "prod-orders-db" valid, docker reachable, 4 check(s) defined
    ```
 
 3. **Run the restore-test** and read the verdict:
 
    ```sh
-   ./salvage run -config salvage.yaml
+   salvage run -config salvage.yaml
    ```
 
    Salvage spins up a disposable Postgres container, restores your artifact,

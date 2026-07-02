@@ -26,8 +26,54 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Spec 0033 R2: one keyless cosign signature over checksums.txt transitively
+# covers every archive. The release workflow installs cosign
+# (sigstore/cosign-installer) and grants `id-token: write`, so the ephemeral
+# signing key is bound to the release workflow's OIDC identity and logged in
+# the Rekor transparency log — no long-lived key to custody. Uploads a single
+# checksums.txt.sigstore.json release asset (the sigstore bundle carrying the
+# signature, certificate, and transparency-log proof together): cosign v3
+# removed the split --output-signature/--output-certificate (.sig/.pem) flags,
+# so the bundle is the only format both cosign v2.4+ and v3 verify. The public
+# verification procedure is documented in README.md ("Verify the artifacts")
+# and in .github/workflows/release.yml.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    artifacts: checksum
+
+# Spec 0033 R4: regenerate and push the Homebrew formula to the Firerok tap
+# (github.com/firerok/homebrew-salvage) on every release, so
+# `brew install firerok/salvage/salvage` / `brew upgrade salvage` track
+# releases with zero manual steps. The formula installs the prebuilt binary
+# (checksummed by Homebrew itself), not a source build.
+#
+# HOMEBREW_TAP_TOKEN and HOMEBREW_SKIP_UPLOAD are set by the release workflow
+# (.github/workflows/release.yml): when the tap-token secret is absent,
+# HOMEBREW_SKIP_UPLOAD is "true" and only the tap PUSH is skipped — a missing
+# secret can never fail the release itself.
+#
+# Note: goreleaser deprecated `brews` in v2.10 in favor of `homebrew_casks`;
+# it still works (warns) throughout v2. Revisit before goreleaser v3.
+brews:
+  - name: salvage
+    repository:
+      owner: firerok
+      name: homebrew-salvage
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://salvage.sh
+    description: "Prove your backups actually restore"
+    license: FSL-1.1-ALv2
+    skip_upload: "{{ .Env.HOMEBREW_SKIP_UPLOAD }}"
+
 # Release notes come from the curated CHANGELOG.md section for the tag
-# (spec 0034 R4; extracted by the release workflow) — never from the mirrored
-# commit log, which is a curated snapshot and not a user-facing narrative.
-changelog:
-  disable: true
+# (spec 0034 R4): the release workflow passes --release-notes, which overrides
+# changelog generation. Do NOT set changelog.disable here — disable
+# short-circuits before --release-notes is read and ships an EMPTY release
+# body (bit us on v0.2.0).

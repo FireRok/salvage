@@ -1,6 +1,6 @@
 # 0033 — Distribution & packaging
 
-- **Status:** Proposed
+- **Status:** Implemented — full R4 tap automation awaits the HOMEBREW_TAP_TOKEN secret (release skips the tap push until set); first signed release = next tag (v0.2.0 predates signing)
 - **Created:** 2026-07-01
 - **Owner:** Firerok
 
