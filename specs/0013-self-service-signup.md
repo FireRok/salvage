@@ -1,6 +1,6 @@
 # 0013 — Self-service signup (attestation free tier)
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-07-01
 - **Owner:** Firerok
 

@@ -1,0 +1,46 @@
+# Salvage — restic (filesystem snapshot) restore-test example (spec 0018).
+# Produce a local backup first:  ./dev/restic/make-backup.sh
+# Then:                          export RESTIC_PASSWORD=salvage-dev
+#                                salvage run -config salvage.restic.example.yaml
+#
+# The restic repo password is a secret, so it is forwarded by name via pass_env
+# (never written in this file). The repository path is not a secret, so it is set
+# inline; for a remote repo (S3/B2/Azure) omit `repository`, add RESTIC_REPOSITORY
+# to pass_env, and forward the backend keys (AWS_*/B2_*/AZURE_*) the same way.
+
+target:
+  name: demo-restic
+  type: restic
+  source:
+    kind: restic
+    snapshot: latest
+    repository: /repo                 # non-secret path; mounted from repo_volume below
+    repo_volume: salvage-restic-repo  # docker volume holding the restic repo
+    pass_env:
+      - RESTIC_PASSWORD               # forwarded by name — value never in this file
+  restore:
+    image: restic/restic:0.19.0
+    timeout: 10m
+  # Paths are relative to the restored tree. make-backup.sh backs up /seed, so the
+  # files land under /restore as seed/etc/app.conf and seed/data/*.csv.
+  checks:
+    - name: config_present
+      kind: file_exists
+      path: seed/etc/app.conf
+    - name: data_files_present
+      kind: file_count
+      path: "seed/data/*.csv"
+      expect_min: 3
+      expect_max: 3
+    - name: seed_checksum
+      kind: checksum
+      path: seed/data/seed.csv
+      equals: "17f559a3c5d175f059adc34bd95ae76c63dc328ab3a15542ccf46b8c5c765cf9"
+    - name: config_readable
+      kind: command
+      command: "grep -q salvage-demo seed/etc/app.conf"
+
+report:
+  format: json
+  out: ./salvage-report-restic.json
+  sign: false

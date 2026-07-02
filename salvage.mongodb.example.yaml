@@ -1,0 +1,56 @@
+# Salvage — MongoDB (logical dump) restore-test example (spec 0025).
+# Produce a local archive first: ./dev/mongodb/make-backup.sh
+# Then:                          salvage run -config salvage.mongodb.example.yaml
+#
+# MongoDB is neither a SQL engine (like Postgres/MySQL) nor a filesystem engine
+# (like restic/borg): it has its own two check kinds, collection_count and
+# doc_query, registered by internal/engine/mongodb. v1 supports a logical
+# (mongodump --archive) restore only; physical/oplog restore is deferred (see
+# spec 0025 Open questions).
+
+target:
+  name: demo-mongodb
+  type: mongodb
+  source:
+    kind: mongodb
+    path: ./dev/mongodb/seed-dump.archive
+  restore:
+    image: mongo:7.0.37
+    database: seeddb
+    timeout: 10m
+  checks:
+    # collection_count: db.orders.countDocuments(<filter>) as a scalar, checked
+    # against expect_min/expect_max/equals — the same expectation shape every
+    # other check kind uses.
+    - name: orders_not_empty
+      kind: collection_count
+      collection: orders
+      expect_min: 1
+
+    - name: shipped_orders_present
+      kind: collection_count
+      collection: orders
+      filter: '{"status":"shipped"}'
+      expect_min: 1
+
+    # doc_query: findOne(filter) against a collection, reading one dotted field
+    # path from the matched document as a scalar — the MongoDB analogue of a
+    # SQL `SELECT field FROM ... WHERE ...` scalar check.
+    - name: order_o1_status
+      kind: doc_query
+      collection: orders
+      filter: '{"_id":"o1"}'
+      field: status
+      equals: "shipped"
+
+    - name: schema_version_current
+      kind: doc_query
+      collection: meta
+      filter: '{"_id":"schema"}'
+      field: version
+      expect_min: 1
+
+report:
+  format: json
+  out: ./salvage-report-mongodb.json
+  sign: false

@@ -1,14 +1,34 @@
 # Salvage
 
 **Prove your backups actually restore.** Salvage restores a backup into a
-throwaway Postgres, asserts the data is really there and usable, and emits a
+throwaway environment (Postgres, MySQL, MongoDB, restic, borg, or your own
+restore command), asserts the data is really there and usable, and emits a
 signed pass/fail verdict. It's the test your backup tool refuses to run.
 
 > Status: **early / work in progress.** The Postgres restore-test loop is
 > validated end-to-end across logical dumps and pgBackRest (local and remote
 > S3/R2) — including a real **TimescaleDB 17 production restore from Cloudflare
-> R2**. Signing and the hosted attestation service are evolving; expect breaking
-> changes before v1.
+> R2** — and the restic, borg, MySQL, and MongoDB engines are verified against
+> live Docker (see `dev/<engine>/`). Signing and the hosted attestation service
+> are evolving; expect breaking changes before v1.
+
+**Documentation:** the [user guide](./docs/guide/README.md) covers every
+engine, the config format, all commands, attestation, scheduling, and CI
+integration. User-visible changes are tracked in [`CHANGELOG.md`](./CHANGELOG.md).
+
+## Requirements
+
+- **Docker** — required for the container engines (`postgres`, `mysql`,
+  `mongodb`, `restic`, `borg`). Salvage spins up a disposable container to
+  restore into, so no host database or backup client is needed — just a
+  reachable Docker daemon.
+- **Go 1.23+** — only to build from source; a prebuilt binary needs nothing.
+- **The `exec` engine needs no Docker.** For a bring-your-own-restore target
+  (`target.type: exec`), Salvage runs *your* restore command on the host and runs
+  the checks against whatever it produced — so it depends only on your own restore
+  tooling (a script, `psql`/`mysql`, etc.), not on Docker. Note that an `exec`
+  restore and its `command` checks run with the Salvage process's privileges: the
+  config is trusted input, exactly like a shell script you'd run by hand.
 
 ## Why
 
@@ -32,8 +52,8 @@ backup tool** and won't ask you to migrate anything — it runs *on top of* the
 backups you already have.
 
 **Representative, not universal.** A passing restore-test proves the backup
-restores *in the environment Salvage used* — a strong sample, not a mathematical
-guarantee. The closer that environment mirrors production, the more the result
+restores *in the environment Salvage used* — a strong sample, not a universal
+claim. The closer that environment mirrors production, the more the result
 generalizes; reports record the environment used so the claim is honestly
 scoped. See [`specs/0000`](./specs/0000-product-overview.md).
 
@@ -43,8 +63,10 @@ scoped. See [`specs/0000`](./specs/0000-product-overview.md).
 salvage run -config salvage.yaml
 ```
 
-1. Spins up a disposable Postgres container (via Docker — no host Postgres
-   client needed), restored with `--rm`.
+1. Spins up a disposable container for the target engine (via Docker — no host
+   database client needed), run with `--rm`. Postgres shown here; MySQL,
+   MongoDB, restic, and borg work the same way, and `exec` skips the container
+   entirely.
 2. Restores your backup artifact into it.
 3. Network-isolates the restored cluster once it reaches a consistent recovery
    point, then runs your assertions: tables present, row counts in range, the
@@ -56,31 +78,64 @@ See [`salvage.example.yaml`](./salvage.example.yaml) for a worked config.
 
 ## Sources
 
-Both logical and physical/PITR Postgres restores are validated end-to-end:
+Salvage is database-first (Postgres), expanding the verification universe one
+engine at a time (spec [0016]/[0017]). Six engines ship today — Postgres
+(logical + physical/PITR), MySQL, MongoDB, the restic and borg filesystem
+engines, and a bring-your-own-restore `exec` engine:
 
-| Kind | What it restores | Example |
-|------|------------------|---------|
-| `pg_dump` | a `pg_dump` archive (custom/dir/tar) | [`salvage.example.yaml`](./salvage.example.yaml) |
-| `sql` | a plain `.sql` dump | [`salvage.example.yaml`](./salvage.example.yaml) |
-| `pgbackrest` | a pgBackRest repo — **local filesystem** | [`salvage.pgbackrest.example.yaml`](./salvage.pgbackrest.example.yaml) |
-| `pgbackrest` | a pgBackRest repo — **remote S3 / Cloudflare R2** | [`salvage.pgbackrest-s3.example.yaml`](./salvage.pgbackrest-s3.example.yaml) |
+| `target.type` | Kind | What it restores | Example |
+|------|------|------------------|---------|
+| `postgres` | `pg_dump` | a `pg_dump` archive (custom/dir/tar) | [`salvage.example.yaml`](./salvage.example.yaml) |
+| `postgres` | `sql` | a plain `.sql` dump | [`salvage.example.yaml`](./salvage.example.yaml) |
+| `postgres` | `pgbackrest` | a pgBackRest repo — **local filesystem** | [`salvage.pgbackrest.example.yaml`](./salvage.pgbackrest.example.yaml) |
+| `postgres` | `pgbackrest` | a pgBackRest repo — **remote S3 / Cloudflare R2** | [`salvage.pgbackrest-s3.example.yaml`](./salvage.pgbackrest-s3.example.yaml) |
+| `mysql` | `mysql` | a logical `mysqldump` `.sql` dump | [`salvage.mysql.example.yaml`](./salvage.mysql.example.yaml) |
+| `mongodb` | `mongodb` | a `mongodump --archive` file | [`salvage.mongodb.example.yaml`](./salvage.mongodb.example.yaml) |
+| `restic` | `restic` | a restic filesystem snapshot (local or remote repo) | [`salvage.restic.example.yaml`](./salvage.restic.example.yaml) |
+| `borg` | `borg` | a BorgBackup archive (local or remote repo) | [`salvage.borg.example.yaml`](./salvage.borg.example.yaml) |
+| `exec` | — | whatever **your** restore command produces (no Docker) | [`salvage.exec.example.yaml`](./salvage.exec.example.yaml) |
 
-The physical path delegates to `pgbackrest restore` and waits for the cluster to
-reach a consistent recovery point before asserting. A local repo is mounted via
-`source.repo_volume`; a remote S3/R2 repo lives in the image's `pgbackrest.conf`
-and credentials are forwarded by name via `source.pass_env`. See
+The physical Postgres path delegates to `pgbackrest restore` and waits for the
+cluster to reach a consistent recovery point before asserting. A local repo is
+mounted via `source.repo_volume`; a remote S3/R2 repo lives in the image's
+`pgbackrest.conf` and credentials are forwarded by name via `source.pass_env`. See
 [`dev/pgbackrest/`](./dev/pgbackrest/) for a self-contained, reproducible
 harness (`make-backup.sh`, `Dockerfile`, `pgbackrest.conf`).
+
+The restic and borg paths restore a snapshot/archive into a throwaway container
+and validate it with non-SQL check kinds — `file_exists`, `file_count`,
+`checksum`, and `command` — inheriting the report + attestation + monitoring
+layers unchanged. Passwords/passphrases and backend keys are forwarded by name
+via `source.pass_env` (never in the config); the container is dropped off every
+network after restore and before checks. MySQL reuses the Postgres `sql` check
+kind; MongoDB brings its own `collection_count` and `doc_query` kinds. See
+[`dev/`](./dev/) for reproducible per-engine harnesses (`make-backup.sh`) and
+the [engines chapter](./docs/guide/03-engines.md) for a first-run block per
+engine.
+
+[0016]: ./specs/0016-modular-engines.md
+[0017]: ./specs/0017-verification-attestation-platform.md
 
 ## Commands
 
 ```sh
-salvage run    -config salvage.yaml   # restore into a throwaway db and assert it works
-salvage check  -config salvage.yaml   # validate config + preflight Docker (no restore)
-salvage inspect [-json] <pgdata-dir>  # offline pre-flight on an unpacked PGDATA dir
+salvage run   [-json] -config salvage.yaml   # restore into a throwaway db and assert it works (-json: report to stdout)
+salvage check -config salvage.yaml           # validate config + preflight Docker (no restore)
+salvage inspect [-json] <pgdata-dir>         # offline pre-flight on an unpacked PGDATA dir
 salvage version
 salvage help
 ```
+
+The full set — including `scaffold [-cap N]` (postgres/mysql/restic/borg/exec),
+`last-good` and `fleet` (pgBackRest/restic/borg), `schedule`, `attest`,
+`verify [-json]`, and `mcp` — is in the
+[command reference](./docs/guide/04-commands.md). `run -json` and
+`verify -json` emit machine-readable JSON (with a `schema_version`) for CI and
+agents; `salvage mcp` serves the whole loop as MCP tools over stdio for agent
+runtimes; see the [CI integration chapter](./docs/guide/08-ci-integration.md).
+`run`, `check`, `scaffold`, `last-good`, `fleet`, and `attest` accept
+`-verbose`/`-quiet` for stderr diagnostics (stdout, report bytes, and exit
+codes never change).
 
 `salvage inspect` reads a PGDATA directory **without starting Postgres** and
 reports the PG major version (from `PG_VERSION`), the
@@ -98,8 +153,11 @@ full run. Add `-json` for machine-readable output.
 
 ## Checks
 
-Each check runs one SQL statement that returns a single scalar, with exactly one
-expectation:
+A check asserts one fact about the restored data. The check *kind* varies by
+engine — `sql` for Postgres/MySQL, `collection_count`/`doc_query` for MongoDB,
+file/command probes for restic/borg/exec (see the
+[configuration reference](./docs/guide/02-configuration.md#check-kinds)) — but
+the shape is the same: a subject that yields a scalar, with an expectation:
 
 | Expectation | Asserts |
 |-------------|---------|
@@ -170,15 +228,32 @@ cp salvage.example.yaml salvage.yaml   # then edit
 
 ## Roadmap
 
-- **More sources.** Logical dumps and pgBackRest (local + S3/R2) are validated;
-  next are object-storage logical artifacts and `restic` / `borg`. See
-  [`specs/0005`](./specs/0005-source-interface-and-roadmap.md).
-- **Independent attestation (hosted).** A local signature proves integrity, not
-  independence. The hosted service issues *independently verifiable* attestation
-  reports — the kind an auditor or cyber-insurer will accept. This is the part
-  you can't self-host, and it's how the project sustains itself.
+**Shipped today:** six engines — Postgres (logical + pgBackRest, local and
+S3/R2, incl. PITR), MySQL and MongoDB (logical dumps), `restic` and `borg`
+filesystem engines, and a bring-your-own-restore `exec` engine; machine-readable
+`run -json`/`verify -json` output; cross-engine `scaffold`, `last-good`, and
+`fleet`; default-on report redaction with a pre-attest secret scan; client-side
+`alerts:` hooks on run/attest; a `salvage mcp` agent-tool server; the hosted
+independent-attestation notary (append-only ledger + public verify page) with
+orgs/teams, share tokens, and a shareable evidence URL; scheduled attestation
+with a dead-man's-switch and webhook/Slack/PagerDuty alert destinations; and
+the auditor/insurer evidence pack. See [`specs/`](./specs/README.md) for status
+per feature.
+
+Next:
+
+- **More engines and deeper restores.** Object-storage artifacts, MySQL
+  physical/binlog restore, MongoDB oplog PITR — each engine inherits the same
+  validation, report, and attestation surface
+  ([`specs/0017`](./specs/0017-verification-attestation-platform.md)). The
+  `exec` engine already covers arbitrary/proprietary restore procedures today.
+- **Hosted execution tier.** Beyond the notary (which counter-signs a restore
+  *you* ran), an optional tier where Salvage supplies the restore environment
+  itself — closing the last gap between "independently attested" and
+  "independently executed."
 - **Fleet view & MSP multi-tenancy.** One dashboard of "every backup, tested,
-  green or red" across clients.
+  green or red" across clients
+  ([`specs/0008`](./specs/0008-hosted-control-plane.md)).
 
 ## Specs
 
@@ -190,10 +265,11 @@ auto-detection and zero-config restore).
 
 ## License
 
-Salvage is **Fair Source**, not open source — licensed under the
-[Functional Source License](./LICENSE) (FSL-1.1-ALv2). Use, run, self-host, and
-modify it freely for any purpose **except** offering it as a competing
-commercial service. Each release becomes Apache 2.0 two years after publication.
+Salvage is **Fair Source** — free to run and self-host, not free to resell —
+licensed under the [Functional Source License](./LICENSE) (FSL-1.1-ALv2). Use,
+run, self-host, and modify it freely for any purpose **except** offering it as
+a competing commercial service. Each release becomes Apache 2.0 two years after
+publication.
 
 ## Development
 

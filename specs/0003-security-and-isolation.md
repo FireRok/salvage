@@ -1,6 +1,6 @@
 # 0003 — Security & isolation
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-06-29
 - **Owner:** Firerok
 

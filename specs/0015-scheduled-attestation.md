@@ -1,6 +1,6 @@
 # 0015 — Scheduled attestation + dead-man's-switch
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-07-01
 - **Owner:** Firerok
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,9 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"salvage.sh/internal/alert"
 	"salvage.sh/internal/attest"
 	"salvage.sh/internal/config"
 	"salvage.sh/internal/engine"
+	"salvage.sh/internal/ephemeral"
 	"salvage.sh/internal/inspect"
 	"salvage.sh/internal/report"
 	"salvage.sh/internal/version"
@@ -50,6 +53,8 @@ func main() {
 		cmdAttest(os.Args[2:])
 	case "verify":
 		cmdVerify(os.Args[2:])
+	case "mcp":
+		cmdMCP(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("salvage " + version.String())
 	case "help", "-h", "--help":
@@ -65,19 +70,26 @@ func usage() {
 	fmt.Print(`salvage — prove your backups actually restore.
 
 Usage:
-  salvage run    -config salvage.yaml   restore a backup into a throwaway db and assert it works
+  salvage run    [-json] -config salvage.yaml   restore a backup into a throwaway db and assert it works (-json: full report to stdout)
   salvage check  -config salvage.yaml   validate config and preflight docker (no restore)
   salvage inspect [-json] <pgdata-dir>  offline pre-flight: report PG version + required extensions (no start)
-  salvage scaffold -config salvage.yaml restore + introspect, then emit a starter config with auto-generated checks
-  salvage last-good -config salvage.yaml  walk a pgbackrest chain newest-first; report the freshest restorable backup
-  salvage fleet    -config salvage.yaml   enumerate every stanza in a pgbackrest repo; optionally emit a config per stanza
+  salvage scaffold [-cap N] -config salvage.yaml restore + introspect (postgres/mysql/restic/borg/exec), then emit a starter config with auto-generated checks
+  salvage last-good -config salvage.yaml  walk the backup chain newest-first (pgbackrest/restic/borg); report the freshest restorable backup — each candidate is a full restore, so use -max to bound long histories
+  salvage fleet    -config salvage.yaml   survey a repo's units (pgbackrest stanzas; a restic/borg repo is one unit), metadata only; optionally emit a config per unit
   salvage schedule -config salvage.yaml   print a systemd timer + cron line to run 'salvage attest' on a cadence
   salvage login    [-endpoint URL]        sign in via your browser and store an API key locally (device flow)
   salvage logout                          remove the stored API key
   salvage attest   -config salvage.yaml   run the test, then submit the signed report to a hosted attestation notary
-  salvage verify   <id|url>               fetch an attestation and verify it offline against Firerok's public key
+  salvage verify   [-json] <id|url>        fetch an attestation and verify it offline against Firerok's public key
+  salvage mcp                              serve Salvage as an MCP server over stdio (agent tools for run/check/inspect/last-good/fleet/verify/attest/scaffold)
   salvage version
   salvage help
+
+Diagnostics:
+  run, check, scaffold, last-good, fleet, and attest accept -verbose and -quiet.
+  Both act on stderr diagnostics only: -quiet suppresses everything but errors,
+  -verbose adds detail (on run/attest, the raw secret-scrubbed command output).
+  Neither changes stdout output, report JSON, or exit codes.
 
 Exit codes:
   0  pass    restore succeeded and every check passed
@@ -90,16 +102,20 @@ func cmdScaffold(args []string) {
 	fs := flag.NewFlagSet("scaffold", flag.ExitOnError)
 	cfgPath := fs.String("config", "salvage.yaml", "config providing the source + restore to introspect")
 	outPath := fs.String("o", "", "write the generated config here (default: stdout)")
+	capN := fs.Int("cap", engine.DefaultScaffoldCap, "max tables/directories per family to generate checks for (top-N by observed size)")
+	v := addVerbosityFlags(fs)
 	_ = fs.Parse(args)
+	v.apply()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		logger.Error("config error: " + err.Error())
 		os.Exit(2)
 	}
-	rendered, err := engine.Scaffold(context.Background(), cfg)
+	logger.Debug("config loaded", "path", *cfgPath, "target", cfg.Target.Name, "type", cfg.Target.Type, "cap", *capN)
+	rendered, err := engine.ScaffoldWithCap(context.Background(), cfg, *capN)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "scaffold error:", err)
+		logger.Error("scaffold error: " + err.Error())
 		os.Exit(2)
 	}
 	if *outPath == "" {
@@ -107,27 +123,30 @@ func cmdScaffold(args []string) {
 		return
 	}
 	if err := os.WriteFile(*outPath, rendered, 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "write:", err)
+		logger.Error("write: " + err.Error())
 		os.Exit(2)
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s\n", *outPath)
+	logger.Info("wrote " + *outPath)
 }
 
 func cmdLastGood(args []string) {
 	fs := flag.NewFlagSet("last-good", flag.ExitOnError)
-	cfgPath := fs.String("config", "salvage.yaml", "config with the pgbackrest source + restore")
-	maxTry := fs.Int("max", 0, "max backups to try (0 = until the first that restores)")
+	cfgPath := fs.String("config", "salvage.yaml", "config with the chain-backed source (pgbackrest, restic, or borg) + restore")
+	maxTry := fs.Int("max", 0, "max backups to try (0 = until the first that restores); every try is a full restore, so cap this on large restic/borg histories")
 	asJSON := fs.Bool("json", false, "emit JSON")
+	v := addVerbosityFlags(fs)
 	_ = fs.Parse(args)
+	v.apply()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		logger.Error("config error: " + err.Error())
 		os.Exit(2)
 	}
+	logger.Debug("config loaded", "path", *cfgPath, "target", cfg.Target.Name, "type", cfg.Target.Type, "max", *maxTry)
 	lg, err := engine.LastGood(context.Background(), cfg, *maxTry)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "last-good error:", err)
+		logger.Error("last-good error: " + err.Error())
 		os.Exit(2)
 	}
 	if *asJSON {
@@ -164,18 +183,21 @@ func printLastGood(lg *report.LastGood) {
 func cmdFleet(args []string) {
 	fs := flag.NewFlagSet("fleet", flag.ExitOnError)
 	cfgPath := fs.String("config", "salvage.yaml", "config providing the repo (source) + restore image")
-	outDir := fs.String("o", "", "write a per-stanza skeleton config into this directory")
+	outDir := fs.String("o", "", "write a per-unit skeleton config into this directory")
 	asJSON := fs.Bool("json", false, "emit JSON")
+	v := addVerbosityFlags(fs)
 	_ = fs.Parse(args)
+	v.apply()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		logger.Error("config error: " + err.Error())
 		os.Exit(2)
 	}
+	logger.Debug("config loaded", "path", *cfgPath, "target", cfg.Target.Name, "type", cfg.Target.Type)
 	fl, err := engine.Fleet(context.Background(), cfg, *outDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fleet error:", err)
+		logger.Error("fleet error: " + err.Error())
 		os.Exit(2)
 	}
 	if *asJSON {
@@ -184,6 +206,27 @@ func cmdFleet(args []string) {
 	} else {
 		printFleet(fl)
 	}
+	if fleetDegraded(fl) {
+		os.Exit(1)
+	}
+}
+
+// fleetDegraded reports whether the fleet survey warrants a failing exit
+// (backlog S2; spec 0029 R5): any surveyed unit is degraded or has zero
+// backups, or the repo has no units at all. Exit 0 only when the survey is
+// non-empty and every unit is healthy with at least one backup — a result, not
+// a crash, so it exits 1 (like last-good's RecoveryPoint == nil), and only
+// after the report (JSON or human) has been emitted.
+func fleetDegraded(fl *report.Fleet) bool {
+	if len(fl.Stanzas) == 0 {
+		return true
+	}
+	for _, s := range fl.Stanzas {
+		if s.Status != "ok" || s.BackupCount == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func printFleet(fl *report.Fleet) {
@@ -318,18 +361,24 @@ func cmdLogin(args []string) {
 	fmt.Print("Waiting for approval")
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Duration(interval) * time.Second)
-		key, status, err := attest.DevicePoll(ctx, *endpoint, dc.DeviceCode)
+		tok, status, err := attest.DevicePoll(ctx, *endpoint, dc.DeviceCode)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\npoll error:", err)
 			os.Exit(2)
 		}
-		if key != "" {
-			if err := attest.SaveCredentials(&attest.Credentials{Endpoint: *endpoint, APIKey: key}); err != nil {
+		if tok != nil {
+			if err := attest.SaveCredentials(&attest.Credentials{Endpoint: *endpoint, APIKey: tok.APIKey, OrgID: tok.OrgID, OrgName: tok.OrgName}); err != nil {
 				fmt.Fprintln(os.Stderr, "\nsave credentials:", err)
 				os.Exit(2)
 			}
 			fmt.Println("\n\n✓ Signed in — stored an API key in ~/.salvage/credentials.")
-			fmt.Println("  salvage attest will use it automatically.")
+			switch tok.OrgName {
+			case "", "personal":
+				fmt.Println("  Attestations from this machine will land in your personal ledger.")
+			default:
+				fmt.Printf("  Attestations from this machine will land in the %q org's ledger.\n", tok.OrgName)
+			}
+			fmt.Println("  salvage attest will use the key automatically.")
 			return
 		}
 		switch status {
@@ -378,7 +427,9 @@ func cmdAttest(args []string) {
 	sigPath := fs.String("sig", "", "signature sidecar for -report (optional)")
 	endpoint := fs.String("endpoint", "", "notary base URL (overrides config attest.endpoint)")
 	keyEnv := fs.String("key-env", "", "env var holding the API key (overrides config attest.api_key_env)")
+	v := addVerbosityFlags(fs)
 	_ = fs.Parse(args)
+	v.apply()
 
 	cfg, cfgErr := config.Load(*cfgPath)
 
@@ -388,29 +439,36 @@ func cmdAttest(args []string) {
 	if *reportPath != "" {
 		b, err := os.ReadFile(*reportPath)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "read report:", err)
+			logger.Error("read report: " + err.Error())
 			os.Exit(2)
 		}
 		reportBytes = b
 		if *sigPath != "" {
 			sb, err := os.ReadFile(*sigPath)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "read sig:", err)
+				logger.Error("read sig: " + err.Error())
 				os.Exit(2)
 			}
 			var s report.Signature
 			if err := json.Unmarshal(sb, &s); err != nil {
-				fmt.Fprintln(os.Stderr, "parse sig:", err)
+				logger.Error("parse sig: " + err.Error())
 				os.Exit(2)
 			}
 			sigB64, pubB64 = s.Signature, s.PublicKey
 		}
 	} else {
 		if cfgErr != nil {
-			fmt.Fprintln(os.Stderr, "config error:", cfgErr)
+			logger.Error("config error: " + cfgErr.Error())
 			os.Exit(2)
 		}
+		logger.Debug("config loaded", "path", *cfgPath, "target", cfg.Target.Name, "type", cfg.Target.Type)
 		rep, runErr := engine.Run(context.Background(), cfg)
+		// Spec 0027 R4: under -verbose the raw (still secret-scrubbed) command
+		// output goes to stderr only; the report bytes below never carry it.
+		// Redact is idempotent, so WriteJSON's internal call becomes a no-op.
+		if raw := rep.Redact(); v.showRaw(false) {
+			raw.Fprint(os.Stderr)
+		}
 		b, _ := rep.WriteJSON("") // bytes only; do not write to disk here
 		reportBytes = b
 		// A tenant signature is optional; produce one when a signing key is configured.
@@ -418,13 +476,43 @@ func cmdAttest(args []string) {
 			if s, serr := report.Sign(cfg.Report.KeyPath, b); serr == nil {
 				sigB64, pubB64 = s.Signature, s.PublicKey
 			} else {
-				fmt.Fprintln(os.Stderr, "warning: could not sign report locally:", serr)
+				logger.Warn("warning: could not sign report locally: " + serr.Error())
 			}
 		}
 		printSummary(rep)
+		// Spec 0030 R1: attest runs the same test, so the run hooks fire here
+		// too — after the report bytes are finalized (no file is written on
+		// this path, so $SALVAGE_REPORT is unset), before exit/submission.
+		fireAlertHook(cfg, rep, reportBytes, "", runErr != nil)
 		if runErr != nil {
-			fmt.Fprintln(os.Stderr, "operational error:", runErr)
+			logger.Error("operational error: " + runErr.Error())
 			os.Exit(2)
+		}
+	}
+
+	// Spec 0027 R7: pattern-gate the bytes about to leave the machine. Default
+	// is refuse — also when no config is available (e.g. -report submissions).
+	scanMode := "refuse"
+	if cfgErr == nil && cfg.Attest != nil && cfg.Attest.SecretScan != "" {
+		scanMode = cfg.Attest.SecretScan
+	}
+	if scanMode != "off" {
+		if matches := report.ScanForCredentials(reportBytes); len(matches) > 0 {
+			// In refuse mode the matches are the reason for the exit-2 error, so
+			// they print at error level (visible under -quiet); in warn mode they
+			// are ordinary warnings.
+			lvl := slog.LevelError
+			if scanMode == "warn" {
+				lvl = slog.LevelWarn
+			}
+			for _, m := range matches {
+				logger.Log(context.Background(), lvl,
+					fmt.Sprintf("secret scan: %s matched %d time(s) in the report", m.Pattern, m.Count))
+			}
+			if scanMode != "warn" {
+				logger.Error("refusing to submit (attest.secret_scan: refuse; set to warn or off to override)")
+				os.Exit(2)
+			}
 		}
 	}
 
@@ -439,7 +527,7 @@ func cmdAttest(args []string) {
 		ep = creds.Endpoint
 	}
 	if ep == "" {
-		fmt.Fprintln(os.Stderr, "no notary endpoint (set -endpoint, attest.endpoint, or run salvage login)")
+		logger.Error("no notary endpoint (set -endpoint, attest.endpoint, or run salvage login)")
 		os.Exit(2)
 	}
 	envName := *keyEnv
@@ -454,13 +542,14 @@ func cmdAttest(args []string) {
 		apiKey = creds.APIKey
 	}
 	if apiKey == "" {
-		fmt.Fprintf(os.Stderr, "no API key (set %s, or run salvage login)\n", envName)
+		logger.Error(fmt.Sprintf("no API key (set %s, or run salvage login)", envName))
 		os.Exit(2)
 	}
 
+	logger.Debug("submitting report", "endpoint", ep)
 	resp, err := attest.Submit(context.Background(), ep, apiKey, reportBytes, sigB64, pubB64)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "attest error:", err)
+		logger.Error("attest error: " + err.Error())
 		os.Exit(2)
 	}
 	shareURL := resp.VerifyURL
@@ -476,9 +565,10 @@ func cmdAttest(args []string) {
 func cmdVerify(args []string) {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	endpoint := fs.String("endpoint", "https://attest.salvage.sh", "notary base URL (for bare-id lookups)")
+	asJSON := fs.Bool("json", false, "emit a machine verdict object as JSON (exit codes unchanged)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: salvage verify <attestation-id|url>")
+		fmt.Fprintln(os.Stderr, "usage: salvage verify [-json] <attestation-id|url>")
 		os.Exit(2)
 	}
 	rec, err := attest.Fetch(context.Background(), *endpoint, fs.Arg(0))
@@ -487,6 +577,18 @@ func cmdVerify(args []string) {
 		os.Exit(2)
 	}
 	checks, ok := attest.Verify(rec)
+	if *asJSON {
+		b, err := json.MarshalIndent(report.NewVerifyVerdict(rec, checks, ok), "", "  ")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "encode json:", err)
+			os.Exit(2)
+		}
+		fmt.Println(string(b))
+		if !ok {
+			os.Exit(1) // invalid attestation still exits 1 (spec 0026 R5)
+		}
+		return
+	}
 	fmt.Printf("\nsalvage verify: %s\n", rec.ID)
 	fmt.Printf("  target %q  verdict %s  seq %d  key %s\n",
 		rec.Target, strings.ToUpper(rec.Verdict), rec.Seq, rec.KeyID)
@@ -510,34 +612,62 @@ func cmdVerify(args []string) {
 func cmdRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfgPath := fs.String("config", "salvage.yaml", "path to config file")
+	asJSON := fs.Bool("json", false, "write the full report JSON to stdout instead of the human summary (exit codes unchanged)")
+	showOutput := fs.Bool("show-output", false, "print raw (still secret-scrubbed) restore output to stderr; never serialized into the report (also implied by -verbose)")
+	v := addVerbosityFlags(fs)
 	_ = fs.Parse(args)
+	v.apply()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		logger.Error("config error: " + err.Error())
 		os.Exit(2)
 	}
+	logger.Debug("config loaded", "path", *cfgPath, "target", cfg.Target.Name, "type", cfg.Target.Type)
 
 	rep, runErr := engine.Run(context.Background(), cfg)
+	logger.Debug("run finished", "verdict", rep.Verdict, "duration_ms", rep.DurationMS)
 
+	// Spec 0027 R4: raw restore output is stderr-only, never serialized.
+	// Redact is idempotent, so WriteJSON's internal call becomes a no-op.
+	if raw := rep.Redact(); v.showRaw(*showOutput) {
+		raw.Fprint(os.Stderr)
+	}
 	b, werr := rep.WriteJSON(cfg.Report.Out)
 	if werr != nil {
-		fmt.Fprintln(os.Stderr, "write report:", werr)
+		logger.Error("write report: " + werr.Error())
+	}
+	if cfg.Report.Out != "" && werr == nil {
+		logger.Debug("report written", "path", cfg.Report.Out)
 	}
 	if cfg.Report.Sign && werr == nil {
 		if sig, serr := report.Sign(cfg.Report.KeyPath, b); serr != nil {
-			fmt.Fprintln(os.Stderr, "sign report:", serr)
+			logger.Error("sign report: " + serr.Error())
 		} else if cfg.Report.Out != "" {
 			if err := report.WriteSignature(cfg.Report.Out+".sig", sig); err != nil {
-				fmt.Fprintln(os.Stderr, "write signature:", err)
+				logger.Error("write signature: " + err.Error())
 			}
 		}
 	}
 
-	printSummary(rep)
+	if *asJSON {
+		// Spec 0026 R2/R3: stdout gets the exact bytes WriteJSON produced — the
+		// same bytes written to report.out (plus the same trailing newline), so
+		// the two destinations are byte-identical. Diagnostics above went to
+		// stderr, so stdout is a single clean JSON document.
+		if b != nil {
+			os.Stdout.Write(append(b, '\n'))
+		}
+	} else {
+		printSummary(rep)
+	}
+
+	// Spec 0030 R1/R2: the alert hook fires only after the report is written
+	// (above) and never changes the exit code decided below.
+	fireAlertHook(cfg, rep, b, cfg.Report.Out, runErr != nil)
 
 	if runErr != nil {
-		fmt.Fprintln(os.Stderr, "operational error:", runErr)
+		logger.Error("operational error: " + runErr.Error())
 		os.Exit(2)
 	}
 	if !rep.Passed() {
@@ -545,18 +675,59 @@ func cmdRun(args []string) {
 	}
 }
 
+// fireAlertHook invokes the configured alerts hook for a finished run (spec
+// 0030 R1): on_fail on a fail verdict or an operational error, on_success on
+// a pass. reportJSON must be the exact bytes report.WriteJSON produced — the
+// single redacted serialization (spec 0027) — never a re-serialization. The
+// hook is best-effort by design (spec 0030 R2): every caller has already
+// written the report, a hook failure is only logged to stderr, and the exit
+// code is decided solely by the run outcome.
+func fireAlertHook(cfg *config.Config, rep *report.Report, reportJSON []byte, reportPath string, opErr bool) {
+	if cfg.Alerts == nil {
+		return
+	}
+	spec := cfg.Alerts.OnSuccess
+	if opErr || !rep.Passed() {
+		spec = cfg.Alerts.OnFail
+	}
+	if spec == "" {
+		return
+	}
+	if reportJSON == nil {
+		// Warn, not error: the hook is best-effort by design and the exit code
+		// is already decided by the run outcome (-quiet suppresses this).
+		logger.Warn("alert hook: skipped (report was not rendered)")
+		return
+	}
+	h := alert.Hook{Spec: spec, Timeout: cfg.Alerts.Timeout.Std()}
+	if err := h.Fire(context.Background(), reportJSON, reportPath); err != nil {
+		logger.Warn("alert hook: " + err.Error())
+	}
+}
+
 func cmdCheck(args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	cfgPath := fs.String("config", "salvage.yaml", "path to config file")
+	v := addVerbosityFlags(fs)
 	_ = fs.Parse(args)
+	v.apply()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config error:", err)
+		logger.Error("config error: " + err.Error())
 		os.Exit(2)
 	}
-	if err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "docker not available (is the daemon running?):", err)
+	logger.Debug("config loaded", "path", *cfgPath, "target", cfg.Target.Name, "type", cfg.Target.Type)
+	// The exec engine (spec 0020) is Docker-free: it runs the customer's own
+	// restore command on the host. Only preflight Docker for the container
+	// engines, and report installed-vs-not-running distinctly (spec 0020 fix A).
+	if cfg.Target.Type == "exec" {
+		fmt.Printf("ok — target %q valid (exec: no docker needed), %d check(s) defined\n",
+			cfg.Target.Name, len(cfg.Target.Checks))
+		return
+	}
+	if err := ephemeral.Preflight(context.Background()); err != nil {
+		logger.Error(err.Error())
 		os.Exit(2)
 	}
 	fmt.Printf("ok — target %q valid, docker reachable, %d check(s) defined\n",

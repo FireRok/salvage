@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schema.salvage.sh/report/v1.json",
+  "title": "Salvage restore-test report (schema_version 1)",
+  "description": "The full outcome of a single Salvage restore-test, as emitted by 'salvage run' (report.out file, -json stdout) and submitted for attestation. This document is immutable: a breaking change to the report shape bumps schema_version and publishes a new document at a new URL.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool",
+    "version",
+    "target",
+    "started_at",
+    "finished_at",
+    "duration_ms",
+    "restore",
+    "checks",
+    "verdict"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Monotonic integer version of this report contract."
+    },
+    "tool": {
+      "type": "string",
+      "const": "salvage"
+    },
+    "version": {
+      "type": "string",
+      "description": "The salvage binary version that produced this report."
+    },
+    "target": {
+      "type": "string",
+      "description": "The configured target name the restore-test ran against."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "restore": {
+      "type": "object",
+      "required": ["ok", "image", "database", "duration_ms"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "method": {
+          "type": "string",
+          "description": "The engine that performed the restore (the target.type). \"exec\" marks an operator-supplied restore command."
+        },
+        "image": { "type": "string" },
+        "database": { "type": "string" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "checks": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["name", "ok"],
+        "properties": {
+          "name": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "severity": {
+            "type": "string",
+            "enum": ["required", "advisory"],
+            "description": "A failing advisory check is recorded but does not fail the verdict. Absent severity means required."
+          },
+          "got": { "type": "string" },
+          "detail": { "type": "string" },
+          "error": { "type": "string" }
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail"]
+    }
+  }
+}

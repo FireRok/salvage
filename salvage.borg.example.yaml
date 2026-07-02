@@ -1,0 +1,46 @@
+# Salvage — borg (BorgBackup filesystem archive) restore-test example (spec 0022).
+# Produce a local backup first:  ./dev/borg/make-backup.sh
+# Then:                          export BORG_PASSPHRASE=salvage-dev
+#                                salvage run -config salvage.borg.example.yaml
+#
+# The borg passphrase is a secret, so it is forwarded by name via pass_env (never
+# written in this file). The repository path is not a secret, so it is set inline;
+# for a remote repo (ssh://) omit `repository`, add BORG_REPO to pass_env, and
+# forward any credentials the transport needs the same way.
+
+target:
+  name: demo-borg
+  type: borg
+  source:
+    kind: borg
+    archive: seed                     # borg has no "latest" alias — name the archive
+    repository: /repo                 # non-secret path; mounted from repo_volume below
+    repo_volume: salvage-borg-repo    # docker volume holding the borg repo
+    pass_env:
+      - BORG_PASSPHRASE               # forwarded by name — value never in this file
+  restore:
+    image: ghcr.io/borgmatic-collective/borgmatic:2.1.6  # borg publishes no official image; this one ships borg (1.4.4) on PATH
+    timeout: 10m
+  # Paths are relative to the restored tree. make-backup.sh archives /seed, so the
+  # files land under /restore as seed/etc/app.conf and seed/data/*.csv.
+  checks:
+    - name: config_present
+      kind: file_exists
+      path: seed/etc/app.conf
+    - name: data_files_present
+      kind: file_count
+      path: "seed/data/*.csv"
+      expect_min: 3
+      expect_max: 3
+    - name: seed_checksum
+      kind: checksum
+      path: seed/data/seed.csv
+      equals: "17f559a3c5d175f059adc34bd95ae76c63dc328ab3a15542ccf46b8c5c765cf9"
+    - name: config_readable
+      kind: command
+      command: "grep -q salvage-demo seed/etc/app.conf"
+
+report:
+  format: json
+  out: ./salvage-report-borg.json
+  sign: false

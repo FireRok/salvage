@@ -1,0 +1,32 @@
+# Salvage — MySQL (logical dump) restore-test example (spec 0024).
+# Produce a local dump first:  ./dev/mysql/make-backup.sh
+# Then:                        salvage run -config salvage.mysql.example.yaml
+#
+# MySQL is a SQL engine (Postgres's closest sibling), not a filesystem engine:
+# the checks below use the same `kind: sql` shape Postgres configs already use
+# (kind defaults to "sql" when omitted) — there is no MySQL-specific check kind.
+# v1 supports a logical (.sql dump) restore only; physical/binlog restore is
+# deferred (see spec 0024 Open questions).
+
+target:
+  name: demo-mysql
+  type: mysql
+  source:
+    kind: mysql
+    path: ./dev/mysql/seed-dump.sql
+  restore:
+    image: mysql:8.4.10
+    database: seeddb
+    timeout: 10m
+  checks:
+    - name: orders_not_empty
+      sql: "select count(*) from orders"
+      expect_min: 1
+    - name: latest_order_recent
+      sql: "select max(created_at) from orders"
+      max_age: 48h
+
+report:
+  format: json
+  out: ./salvage-report-mysql.json
+  sign: false

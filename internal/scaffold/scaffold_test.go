@@ -21,6 +21,7 @@ func TestRenderRoundTrips(t *testing.T) {
 	maxAge := ptrDur(48 * time.Hour)
 	cfg := Build(
 		"prod-orders-db",
+		"postgres",
 		config.Source{
 			Kind:       "pgbackrest",
 			Stanza:     "orders",

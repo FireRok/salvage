@@ -232,35 +232,48 @@ func DeviceStart(ctx context.Context, endpoint string) (*DeviceCode, error) {
 	return &dc, nil
 }
 
-// DevicePoll polls once for the token. It returns the api key on success, or a
+// DeviceToken is the notary's successful response to POST /device/token: the
+// minted key plus the org it is pinned to (org_name "personal" = the account's
+// own ledger), so the caller can say where attestations will land.
+type DeviceToken struct {
+	APIKey  string `json:"api_key"`
+	OrgID   string `json:"org_id"`
+	OrgName string `json:"org_name"`
+}
+
+// DevicePoll polls once for the token. It returns the token on success, or a
 // status string ("authorization_pending", "slow_down", or a terminal error) that
 // the caller uses to decide whether to keep polling.
-func DevicePoll(ctx context.Context, endpoint, deviceCode string) (apiKey, status string, err error) {
+func DevicePoll(ctx context.Context, endpoint, deviceCode string) (tok *DeviceToken, status string, err error) {
 	url := strings.TrimRight(endpoint, "/") + "/device/token"
 	b, _ := json.Marshal(map[string]string{"device_code": deviceCode})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient().Do(req)
 	if err != nil {
-		return "", "", err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var out struct {
-		APIKey string `json:"api_key"`
-		Error  string `json:"error"`
+		DeviceToken
+		Error string `json:"error"`
 	}
 	_ = json.Unmarshal(body, &out)
 	if out.APIKey != "" {
-		return out.APIKey, "", nil
+		return &out.DeviceToken, "", nil
 	}
-	return "", out.Error, nil
+	return nil, out.Error, nil
 }
 
 // Credentials is the locally stored login state (~/.salvage/credentials).
+// OrgID/OrgName record which org the key is pinned to (empty on files written
+// before org pinning existed — those keys resolve to the personal ledger).
 type Credentials struct {
 	Endpoint string `json:"endpoint"`
 	APIKey   string `json:"api_key"`
+	OrgID    string `json:"org_id,omitempty"`
+	OrgName  string `json:"org_name,omitempty"`
 }
 
 func credsPath() (string, error) {

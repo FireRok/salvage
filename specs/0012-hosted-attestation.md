@@ -1,6 +1,6 @@
 # 0012 — Hosted attestation (independent notary ledger)
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-06-30
 - **Owner:** Firerok
 
@@ -33,11 +33,10 @@ MUST NOT conflate the two.
 
 ## Cost posture
 
-Serverless, no per-customer compute: Cloudflare **Worker + D1**. At pre-customer scale
-~$0–5/mo (Workers paid plan $5; free tier covers 100k req/day; D1 storage trivial —
-reports are small JSON). A **limited free tier** (N attestations/month, public ledger)
-is therefore feasible well under $100/mo because notarizing has no compute cost. No
-always-on process; $0 at idle.
+Serverless, no per-customer compute: Cloudflare **Worker + D1**. Notarizing is
+signature verification + a counter-signature + a small-JSON append, so the service
+has no always-on process and scales to zero when idle — which is what makes a
+**limited free tier** (N attestations/month, public ledger) sustainable by design.
 
 ## Goals
 

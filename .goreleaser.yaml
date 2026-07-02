@@ -26,5 +26,8 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Release notes come from the curated CHANGELOG.md section for the tag
+# (spec 0034 R4; extracted by the release workflow) — never from the mirrored
+# commit log, which is a curated snapshot and not a user-facing narrative.
 changelog:
-  use: github
+  disable: true

@@ -1,6 +1,6 @@
 # 0014 — Accounts, API keys, and CLI auth
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-07-01
 - **Owner:** Firerok
 

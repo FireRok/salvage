@@ -1,6 +1,6 @@
 # 0002 — Reporting & attestation
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-06-29
 - **Owner:** Firerok
 

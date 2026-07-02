@@ -1,116 +1,80 @@
-// Package checks evaluates assertions against a restored database.
+// Package checks orchestrates assertion evaluation against a restored target.
+//
+// Orchestration is horizontal and engine-agnostic (spec 0017 R3): Run iterates
+// the configured checks, dispatches each to the evaluator registered for its
+// kind, and returns a result per check. The *evaluation* of a kind is vertical —
+// an engine registers an Evaluator that knows how to run that kind against its
+// RestoredTarget. The built-in "sql" evaluator lives in this package (sql.go);
+// non-SQL engines (restic/borg, MongoDB, object-storage) register their own
+// kinds from their own packages so this file never learns about them.
 package checks
 
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
-	"time"
 
 	"salvage.sh/internal/config"
 	"salvage.sh/internal/report"
 )
 
-// Queryer runs a scalar SQL query. *ephemeral.Postgres satisfies it.
-type Queryer interface {
-	Query(ctx context.Context, sql string) (string, error)
+// Target is the restored thing a check runs against, passed opaquely through the
+// orchestration. It is deliberately empty: Run does not know what capability any
+// given kind needs, so each Evaluator type-asserts the Target to the interface it
+// requires (the sql evaluator to Queryer, a future file-check to a filesystem
+// handle, etc.). This is the seam that decouples orchestration from SQL.
+type Target = any
+
+// Evaluator runs one check of a particular kind against target and returns its
+// result. An evaluator that cannot use target (wrong capability) returns a
+// non-OK CheckResult with Error set — never a panic.
+type Evaluator func(ctx context.Context, target Target, c config.Check) report.CheckResult
+
+// evaluators maps a check kind to its evaluator. It is populated by init()s
+// (RegisterEvaluator) and only read after that, so no locking is needed —
+// mirroring the engine SPI registry (spec 0016).
+var evaluators = map[string]Evaluator{}
+
+// RegisterEvaluator registers e as the evaluator for kind. It panics on an empty
+// kind or a duplicate registration — both are programmer errors caught at init.
+func RegisterEvaluator(kind string, e Evaluator) {
+	if kind == "" {
+		panic("checks: RegisterEvaluator with empty kind")
+	}
+	if _, dup := evaluators[kind]; dup {
+		panic("checks: duplicate evaluator for kind " + kind)
+	}
+	evaluators[kind] = e
 }
 
-// Run evaluates every check and returns a result per check, in order.
-func Run(ctx context.Context, q Queryer, checks []config.Check) []report.CheckResult {
+// kindOf returns the check's kind, defaulting an empty kind to "sql" — the
+// historical single kind. Existing (kind-less) configs therefore route to the
+// sql evaluator, byte-identically to before.
+func kindOf(c config.Check) string {
+	if c.Kind == "" {
+		return "sql"
+	}
+	return c.Kind
+}
+
+// Run evaluates every check against target and returns a result per check, in
+// order. Each check is dispatched by its kind to the registered evaluator;
+// severity is carried through so the caller's verdict rule is unchanged. An
+// unknown kind (no registered evaluator) yields a clear failing result rather
+// than a panic, so a misconfigured kind fails the verdict instead of the process.
+func Run(ctx context.Context, target Target, checks []config.Check) []report.CheckResult {
 	out := make([]report.CheckResult, 0, len(checks))
 	for _, c := range checks {
-		out = append(out, evaluate(ctx, q, c))
+		kind := kindOf(c)
+		eval, ok := evaluators[kind]
+		if !ok {
+			out = append(out, report.CheckResult{
+				Name:     c.Name,
+				Severity: c.Severity,
+				Error:    fmt.Sprintf("unknown check kind %q", kind),
+			})
+			continue
+		}
+		out = append(out, eval(ctx, target, c))
 	}
 	return out
-}
-
-func evaluate(ctx context.Context, q Queryer, c config.Check) report.CheckResult {
-	res := report.CheckResult{Name: c.Name, Severity: c.Severity}
-	got, err := q.Query(ctx, c.SQL)
-	if err != nil {
-		res.Error = err.Error()
-		return res
-	}
-	got = strings.TrimSpace(got)
-	res.Got = got
-
-	switch {
-	case c.ExpectMin != nil || c.ExpectMax != nil:
-		v, perr := strconv.ParseFloat(got, 64)
-		if perr != nil {
-			res.Error = fmt.Sprintf("expected a number, got %q", got)
-			return res
-		}
-		res.OK = true
-		switch {
-		case c.ExpectMin != nil && v < *c.ExpectMin:
-			res.OK = false
-			res.Detail = fmt.Sprintf("%g < min %g", v, *c.ExpectMin)
-		case c.ExpectMax != nil && v > *c.ExpectMax:
-			res.OK = false
-			res.Detail = fmt.Sprintf("%g > max %g", v, *c.ExpectMax)
-		default:
-			res.Detail = fmt.Sprintf("%g within bounds", v)
-		}
-	case c.Equals != nil:
-		res.OK = got == *c.Equals
-		if !res.OK {
-			res.Detail = fmt.Sprintf("want %q", *c.Equals)
-		}
-	case c.MaxAge != nil:
-		ts, perr := parseTime(got)
-		if perr != nil {
-			res.Error = fmt.Sprintf("expected a timestamp, got %q", got)
-			return res
-		}
-		age := time.Since(ts)
-		res.OK = age <= c.MaxAge.Std()
-		res.Detail = fmt.Sprintf("age %s (max %s)", age.Round(time.Second), c.MaxAge.Std())
-	case c.Bool != nil:
-		b, perr := parseBool(got)
-		if perr != nil {
-			res.Error = fmt.Sprintf("expected a boolean, got %q", got)
-			return res
-		}
-		res.OK = b == *c.Bool
-		if !res.OK {
-			res.Detail = fmt.Sprintf("want %t", *c.Bool)
-		}
-	default:
-		res.Error = "no expectation configured"
-	}
-	return res
-}
-
-var tsLayouts = []string{
-	"2006-01-02 15:04:05.999999-07",
-	"2006-01-02 15:04:05-07",
-	"2006-01-02 15:04:05.999999",
-	"2006-01-02 15:04:05",
-	time.RFC3339Nano,
-	time.RFC3339,
-	"2006-01-02",
-}
-
-// parseBool reads a Postgres boolean scalar. Postgres renders booleans as "t"/"f"
-// but SQL predicates and casts may also yield "true"/"false" or "1"/"0".
-func parseBool(s string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "t", "true", "1":
-		return true, nil
-	case "f", "false", "0":
-		return false, nil
-	}
-	return false, fmt.Errorf("unrecognized boolean %q", s)
-}
-
-func parseTime(s string) (time.Time, error) {
-	for _, l := range tsLayouts {
-		if t, err := time.Parse(l, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("unrecognized timestamp %q", s)
 }

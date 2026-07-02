@@ -1,6 +1,6 @@
 # 0016 — Modular engines (a registry-driven engine SPI)
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-07-01
 - **Owner:** Firerok
 
@@ -56,6 +56,14 @@ type RestoredTarget interface {
     Stop() error         // teardown; idempotent
 }
 ```
+
+> **Superseded by [[spec 0017]] (as built).** The SQL-bound `RestoredTarget` above
+> was the original seam; to admit non-SQL engines (restic/borg), 0017 reduced
+> `RestoredTarget` to just `Stop() error`. Check evaluation now goes through a
+> kind→evaluator registry where each evaluator *type-asserts* the target to the
+> capability it needs (the `sql` evaluator to `checks.Queryer`), and `scaffold`
+> type-asserts `discover.RowQueryer` (gating off when absent). R1 below should be
+> read with that generalization; everything else in this spec stands.
 
 `Restore` stands up a throwaway environment, restores the backup into it, and
 returns a live `RestoredTarget`. Its error contract preserves the existing
@@ -192,6 +200,15 @@ Nothing in `internal/engine`'s orchestration changes for steps 1–4.
   and keeping it as-is preserves today's exact error messages.
 - **`ephemeral`/`discover` naming.** Left Postgres-shaped and unmoved by design;
   a future engine adds a sibling rather than generalizing these in place.
+
+## See also
+
+This spec is the **vertical** seam (per-backup-type restore). The **horizontal**
+platform every engine inherits — validation orchestration, the report, independent
+attestation, and cadence monitoring — plus how validation generalizes to non-SQL
+backup types (the check-`kind` seam), is specified in [[spec 0017]]. Together they
+frame Salvage as a modular verification-and-attestation platform: engines are
+vertical, the moat is horizontal.
 
 ## Acceptance criteria
 

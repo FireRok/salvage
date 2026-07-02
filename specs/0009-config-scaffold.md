@@ -1,6 +1,6 @@
 # 0009 — Config scaffolding (deterministic, with optional AI assist)
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-06-30
 - **Owner:** Firerok
 

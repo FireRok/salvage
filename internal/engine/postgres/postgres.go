@@ -15,6 +15,7 @@ import (
 
 	"salvage.sh/internal/checks"
 	"salvage.sh/internal/config"
+	"salvage.sh/internal/discover"
 	"salvage.sh/internal/engine/spi"
 	"salvage.sh/internal/ephemeral"
 	"salvage.sh/internal/pgbrinfo"
@@ -26,7 +27,43 @@ func init() { spi.Register(Engine{}) }
 // own ephemeral environment.
 type Engine struct{}
 
+// The engine contributes its own config validation (spec 0016 R6) and check
+// discovery for `salvage scaffold` (spec 0028 R2).
+var (
+	_ spi.ConfigValidator = Engine{}
+	_ spi.Scaffolder      = Engine{}
+)
+
 func (Engine) Type() string { return "postgres" }
+
+// ValidateConfig applies the Postgres source allow-list: the pg_dump/sql/
+// pgbackrest rules — and their messages — that used to live in
+// config.Validate's central switch, now contributed by the engine itself via
+// spi.ConfigValidator.
+func (Engine) ValidateConfig(cfg *config.Config) error {
+	t := cfg.Target
+	switch t.Source.Kind {
+	case "pg_dump", "sql":
+		if t.Source.Path == "" {
+			return fmt.Errorf("target.source.path is required for kind %q", t.Source.Kind)
+		}
+		if _, err := os.Stat(t.Source.Path); err != nil {
+			return fmt.Errorf("target.source.path: %w", err)
+		}
+	case "pgbackrest":
+		if t.Source.Stanza == "" {
+			return fmt.Errorf("target.source.stanza is required for pgbackrest")
+		}
+		if t.Restore.Image == "" {
+			return fmt.Errorf("target.restore.image is required for pgbackrest (needs postgres + pgbackrest)")
+		}
+	case "":
+		return fmt.Errorf("target.source.kind is required (pg_dump|sql|pgbackrest)")
+	default:
+		return fmt.Errorf("target.source.kind %q unsupported (pg_dump|sql|pgbackrest)", t.Source.Kind)
+	}
+	return nil
+}
 
 // Restore stands up the ephemeral environment for cfg's source kind, restores
 // into it, and returns a live RestoredTarget. It preserves the original
@@ -34,6 +71,9 @@ func (Engine) Type() string { return "postgres" }
 // wrapped as spi.Fault (operational); a backup that fails to restore is a bare
 // error (a "fail" verdict). warnings is pg_restore's benign-error note, if any.
 func (Engine) Restore(ctx context.Context, cfg *config.Config) (spi.RestoredTarget, string, error) {
+	if err := ephemeral.Preflight(ctx); err != nil {
+		return nil, "", spi.Faultf(err) // operational: docker missing/unreachable
+	}
 	src := cfg.Target.Source
 	switch src.Kind {
 	case "pgbackrest":
@@ -64,10 +104,41 @@ func (Engine) Restore(ctx context.Context, cfg *config.Config) (spi.RestoredTarg
 	}
 }
 
+// Discover proposes candidate checks from the restored cluster: it asserts the
+// restored target to discover.RowQueryer and calls the existing Postgres
+// catalog introspection verbatim. Part of the spi.Scaffolder capability behind
+// `salvage scaffold` (spec 0028 R2) — Postgres is the first implementer, and
+// this is a behaviour-preserving wrap: the discovery logic, heuristics, and
+// thresholds in internal/discover are unchanged, so scaffold output is
+// byte-identical to before the capability existed.
+//
+// Candidates carry no cap group: internal/discover applies its own historical
+// per-table cap (spec 0009 R4), and re-capping in the shared emission layer
+// could reorder or re-truncate — violating the byte-identical guarantee.
+func (Engine) Discover(ctx context.Context, rt spi.RestoredTarget, cfg *config.Config) ([]spi.ScaffoldCandidate, error) {
+	rq, ok := rt.(discover.RowQueryer)
+	if !ok {
+		return nil, fmt.Errorf("restored target for target.type %q does not answer row queries", cfg.Target.Type)
+	}
+	disc, err := discover.Introspect(ctx, rq, cfg.Target.Restore.Database)
+	if err != nil {
+		return nil, fmt.Errorf("introspect: %w", err)
+	}
+	generated := discover.GenerateChecks(disc)
+	cands := make([]spi.ScaffoldCandidate, len(generated))
+	for i, c := range generated {
+		cands[i] = spi.ScaffoldCandidate{Check: c}
+	}
+	return cands, nil
+}
+
 // Chain returns the pgBackRest backup chain (newest first) for cfg's stanza,
 // standing up a short-lived env just to read `pgbackrest info`. Part of the
 // spi.ChainTester capability that backs `last-good`.
 func (Engine) Chain(ctx context.Context, cfg *config.Config) ([]spi.Backup, error) {
+	if err := ephemeral.Preflight(ctx); err != nil {
+		return nil, err
+	}
 	if err := requireEnv(cfg.Target.Source.PassEnv); err != nil {
 		return nil, err
 	}
@@ -120,6 +191,9 @@ func (Engine) TestBackup(ctx context.Context, cfg *config.Config, label string) 
 // Survey enumerates every stanza in the pgBackRest repo (metadata only, no
 // restore). Part of the spi.FleetSurveyor capability that backs `fleet`.
 func (Engine) Survey(ctx context.Context, cfg *config.Config) ([]spi.FleetUnit, error) {
+	if err := ephemeral.Preflight(ctx); err != nil {
+		return nil, err
+	}
 	if err := requireEnv(cfg.Target.Source.PassEnv); err != nil {
 		return nil, err
 	}

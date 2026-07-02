@@ -13,22 +13,44 @@ import (
 	"time"
 )
 
+// SchemaVersion is the version of the report JSON contract (spec 0026 R1).
+// It is a single monotonic integer: consumers ask "is this a shape I
+// understand?" with a simple >= comparison. Bumping it means publishing a new
+// schema document at the stable public URL, never mutating an existing one
+// (spec 0026 R7). The current document lives at report.v1.schema.json in this
+// package and is published under https://schema.salvage.sh/report/v1.json.
+const SchemaVersion = 1
+
 // Report is the full outcome of a single restore-test.
 type Report struct {
-	Tool       string        `json:"tool"`
-	Version    string        `json:"version"`
-	Target     string        `json:"target"`
-	StartedAt  time.Time     `json:"started_at"`
-	FinishedAt time.Time     `json:"finished_at"`
-	DurationMS int64         `json:"duration_ms"`
-	Restore    RestoreResult `json:"restore"`
-	Checks     []CheckResult `json:"checks"`
-	Verdict    string        `json:"verdict"` // "pass" | "fail"
+	SchemaVersion int           `json:"schema_version"`
+	Tool          string        `json:"tool"`
+	Version       string        `json:"version"`
+	Target        string        `json:"target"`
+	StartedAt     time.Time     `json:"started_at"`
+	FinishedAt    time.Time     `json:"finished_at"`
+	DurationMS    int64         `json:"duration_ms"`
+	Restore       RestoreResult `json:"restore"`
+	Checks        []CheckResult `json:"checks"`
+	Verdict       string        `json:"verdict"` // "pass" | "fail"
+
+	// secrets is the known secret set for the run (spec 0027 R3): resolved
+	// pass_env/restore.env values and engine-forwarded container passwords.
+	// Unexported — never serialized — and consumed by Redact (redact.go), which
+	// WriteJSON applies before producing bytes. See SetKnownSecrets.
+	secrets []Secret
 }
 
 // RestoreResult records whether the backup came back at all.
 type RestoreResult struct {
-	OK         bool   `json:"ok"`
+	OK bool `json:"ok"`
+	// Method is the engine that performed the restore (the target.type). For the
+	// exec engine (spec 0020 R7) it is "exec", marking the restore as
+	// operator-supplied: Salvage ran the customer's own restore command rather
+	// than independently reconstructing the backup. Downstream artifacts (verify
+	// page, evidence pack) surface this so an exec attestation is never read as
+	// "Salvage independently restored this."
+	Method     string `json:"method,omitempty"`
 	Image      string `json:"image"`
 	Database   string `json:"database"`
 	DurationMS int64  `json:"duration_ms"`
@@ -48,11 +70,20 @@ type CheckResult struct {
 	Got      string `json:"got,omitempty"`
 	Detail   string `json:"detail,omitempty"`
 	Error    string `json:"error,omitempty"`
+
+	// KeepLiteral is the per-check opt-in (spec 0027 R2/R5, config
+	// keep_literal) to retain the exact Got literal for a byte-equal assertion
+	// instead of the default bounded preview. Known-secret scrubbing (R3) still
+	// applies. Never serialized: it steers redaction, it is not report data.
+	KeepLiteral bool `json:"-"`
 }
 
-// New starts a report clock for a target.
+// New starts a report clock for a target. It stamps SchemaVersion here — the
+// single place every report is born — so the field is present and identical on
+// every path that produces report bytes (report.out, run -json stdout, and the
+// attestation submission) and no call site can omit it (spec 0026 R1).
 func New(target, version string) *Report {
-	return &Report{Tool: "salvage", Version: version, Target: target, StartedAt: time.Now()}
+	return &Report{SchemaVersion: SchemaVersion, Tool: "salvage", Version: version, Target: target, StartedAt: time.Now()}
 }
 
 // Finalize stamps timings and computes the pass/fail verdict.
@@ -81,6 +112,14 @@ func (r *Report) Passed() bool { return r.Verdict == "pass" }
 // WriteJSON renders the report and, if path is non-empty, writes it there.
 // It always returns the rendered bytes (used as the signing payload).
 func (r *Report) WriteJSON(path string) ([]byte, error) {
+	// Spec 0027 R1/R2/R5/R8: redact captured program output before the bytes
+	// exist. WriteJSON is the single serializer for report.out, `run -json`
+	// stdout, and the attest submission, so redaction is default-on for every
+	// durable or counter-signed artifact on every outcome path, and there is no
+	// window in which raw output is signed and cleaned up afterward. Redact is
+	// idempotent, so an earlier explicit call (e.g. to capture raw output for a
+	// local-only verbose flag, R4) makes this a no-op.
+	r.Redact()
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return nil, err

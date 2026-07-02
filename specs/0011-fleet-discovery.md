@@ -1,6 +1,6 @@
 # 0011 — Fleet discovery (enumerate a whole pgBackRest repo)
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-06-30
 - **Owner:** Firerok
 

@@ -1,0 +1,33 @@
+# Salvage — exec (bring-your-own-restore) example (spec 0020).
+# The exec engine runs YOUR restore command on the host — no container — and
+# then validates the result with the same check framework as every other
+# engine. Point `command` at whatever performs your restore (a script, a
+# vendor CLI, make target …); exit 0 means "restored".
+#
+#   salvage run -config salvage.exec.example.yaml
+#
+# Anything the command needs secretly (tokens, passwords) is forwarded by
+# NAME via `env` — the values come from the host environment, never this file.
+# NOTE: a pass here proves the restore worked in the environment your command
+# used; the report records the restore as operator-supplied (method: exec).
+
+target:
+  name: legacy-restore
+  type: exec
+  restore:
+    command: ["/opt/restore.sh", "--latest"]  # required; exit 0 = restored
+    env:                                      # host var names the command needs
+      - RESTORE_TOKEN                         # forwarded by name — value never in this file
+    workdir: /var/lib/legacy-restore          # relative check paths resolve here
+    timeout: 30m                              # timed-out restore = fail verdict
+    cleanup: ["/opt/restore.sh", "--teardown"]  # optional; failure = warning only
+  checks:
+    # Assert the restored service actually answers, not just that files exist.
+    - name: service_healthy
+      kind: http
+      url: http://127.0.0.1:8080/healthz
+      expect_status: 200
+      expect_body_contains: "ok"
+    - name: data_dir_present
+      kind: file_exists
+      path: data/current

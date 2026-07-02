@@ -1,6 +1,6 @@
 # 0010 — Last-known-good recovery-point discovery
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Created:** 2026-06-30
 - **Owner:** Firerok
 

@@ -98,6 +98,25 @@ touching the core orchestrator is specified in `0016` (modular engines): an
 registered engine. R6's small source-kind interface lives *inside* an engine;
 `0016` is the layer above it that selects which engine handles a target.
 
+**The platform vision (the moat is horizontal, the engine is vertical).** The
+restore-test engine is *vertical* — per backup type, each needing its own restore +
+validation-evaluation + discovery. The validation *orchestration*, the report, the
+independent attestation surface, and the cadence dead-man's-switch are *horizontal* —
+they generalize across every backup type for free. So each new engine multiplies the
+reach of the attestation moat without rebuilding it. `0017` specifies that horizontal
+platform and how validation generalizes to non-SQL backup types (the check-`kind`
+seam). Named engine roadmap, honestly present-tense-scoped (a type we don't yet verify
+is a roadmap item, not a feature):
+
+- **Now:** PostgreSQL (pg_dump / `.sql` / pgBackRest, logical + physical/PITR).
+- **In progress:** `restic` filesystem snapshots — the first non-SQL engine,
+  exercising the `0017` validation-`kind` seam with file/command checks ([[spec 0018]]).
+- **Next engine:** `borg` filesystem snapshots (a sibling of restic).
+- **Then:** MySQL, MongoDB, object-storage artifacts.
+
+North star: *prove and attest **any** backup*; present: *database-first, starting with
+Postgres, expanding the verification universe one engine at a time*.
+
 ## How this sharpens other specs
 
 - **`0001` (config-for-intent):** transport config belongs to the backup tool's
